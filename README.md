@@ -37,7 +37,7 @@ Built solo in 2025–2026 on a single RTX 3080 Ti.
    - Go to **Cortex Control** tab (default on launch)
    - Select a lobe slot (LOBE 1–4) in the header
    - **Create a new lobe**:
-     - Choose "Target Genetics" from dropdown (e.g., "MaskedDiffusion-mHC" for diffusion dreaming, "Tetra-Llama" for strong reasoning)
+     - Choose "Target Genetics" from dropdown (e.g., "MaskedDiffusion-mHC" for diffusion dreaming, "Tetra-Llama" for strong reasoning, the most advanced model is diffusion_mhc.py)
      - Click **INITIALIZE NEW** → creates fresh weights with selected architecture
    - **Load an existing lobe**:
      - Place `.pt` files in the `lobes/` folder (or use LOAD FILE button)
