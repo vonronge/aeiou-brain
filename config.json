@@ -1,0 +1,8 @@
+{
+  "system_name": "AEIOU_v3.1",
+  "evolution_settings": {
+    "shadow_mode_enabled": false,
+    "commando_protocol": true,
+    "mutation_rate": "high"
+  }
+}

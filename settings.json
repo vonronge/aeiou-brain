@@ -1,0 +1,58 @@
+{
+  "system_name": "AEIOU_v16",
+  "colors": {
+    "BG_MAIN": "#0b0f19",
+    "BG_CARD": "#131620",
+    "FG_TEXT": "#E3E3E3",
+    "FG_DIM": "#8e9198",
+    "ACCENT": "#A8C7FA",
+    "BTN": "#1E222D",
+    "BTN_ACT": "#2B3042",
+    "SUCCESS": "#81C995",
+    "ERROR": "#F28B82",
+    "WARN": "#FDD663",
+    "BORDER": "#444444",
+    "GRID": "#333333",
+    "SCROLL": "#2B3042"
+  },
+  "evolution_settings": {
+    "shadow_mode_enabled": false,
+    "commando_protocol": true,
+    "mutation_rate": "high"
+  },
+  "last_active_lobe": 3,
+  "tab_order": [
+    "Cortex Control",
+    "Playground",
+    "Memory Graph",
+    "Memory Agent",
+    "Transformer Trainer",
+    "Dream State",
+    "Lecture Factory",
+    "Video Timeline Factory",
+    "Comic Scanner",
+    "Symbiosis",
+    "The Council",
+    "Telemetry",
+    "System Config",
+    "Diffusion Director",
+    "RLM Reasoning"
+  ],
+  "sidebar_order": [
+    "tab_cortex",
+    "tab_trainer",
+    "tab_diffusion_trainer",
+    "tab_playground",
+    "tab_rlm",
+    "tab_dream",
+    "tab_memory",
+    "tab_memory_agent",
+    "tab_symbiosis",
+    "tab_council",
+    "tab_factory",
+    "tab_video_factory",
+    "tab_comic",
+    "tab_graphs",
+    "tab_settings"
+  ]
+}

@@ -1,0 +1,40 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+.venv
+pip-delete-this-directory.txt
+
+# Models & Large Files
+lobes/*.pt
+*.pt
+*.bin
+*.pth
+
+# Data & Personal
+Training_Data/
+Chaos_Buffer/
+Comics_Output/
+memories/*.yaml
+memories/*.faiss
+memories/*.jsonl
+memories/*.pt
+temp_*.mp4
+temp_*.wav
+
+# OS Junk
+.DS_Store
+Thumbs.db
+.desktop
+
+# Logs & Cache
+*.log
+*.cache
+
+# IDE
+.vscode/
+.idea/
