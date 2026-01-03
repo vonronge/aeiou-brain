@@ -25,37 +25,49 @@ Built solo in 2025–2026 on a single RTX 3080 Ti.
 
 ### How to Use
 1. **Prepare Data**
-   - Create a folder inside `Training_Data` (e.g., `MyBooks`, `Lectures`, `Comics`).
-   - Drop files with matching filenames:
-     - `lecture.pdf` + `lecture.mp3` → audio + text pair
-     - `page.png` + `page.txt` → image + text pair
-     - `video.mp4` + `video.srt` → video + subtitles (auto-sliced into triplets)
-     - Full books: PDF + optional audio narration → Lecture Factory processes into quads/triplets
-   - AEIOU automatically detects quads, triplets, pairs, and singles.
+   - Create folders inside `Training_Data` (e.g., `MyBooks`, `Lectures`, `Comics`).
+   - Use matching filenames for multimodal pairs:
+     - `book.pdf` + `book.mp3` → audio + text
+     - `page.png` + `page.txt` → image + text
+     - `video.mp4` + `video.srt` → video + subtitles (auto-sliced)
+   - AEIOU detects quads, triplets, pairs, and singles automatically.
 
-2. **Train/Finetune**
-   - Launch `GUI.py`
-   - Go to **Transformer Trainer** or **Diffusion Director**
+2. **Creating & Loading Lobes (Brains)**
+   - Open the GUI (`python GUI.py`)
+   - Go to **Cortex Control** tab (default on launch)
+   - Select a lobe slot (LOBE 1–4) in the header
+   - **Create a new lobe**:
+     - Choose "Target Genetics" from dropdown (e.g., "MaskedDiffusion-mHC" for diffusion dreaming, "Tetra-Llama" for strong reasoning)
+     - Click **INITIALIZE NEW** → creates fresh weights with selected architecture
+   - **Load an existing lobe**:
+     - Place `.pt` files in the `lobes/` folder (or use LOAD FILE button)
+     - Select lobe slot → click **ACTIVATE LOBE** (or LOAD FILE to browse)
+   - Save with **SAVE AS...** or auto-save during training
+   - Tip: Start with diffusion genetics for creative tasks, AR for reasoning/text.
+
+3. **Train/Finetune**
+   - Go to **Transformer Trainer** (AR models) or **Diffusion Director** (diffusion models)
    - Click "SCAN FOLDER" → select your data folder
-   - Filter by type (quad/triplet/pair/single) or extension in the Census panel
-   - Choose lobe/genetics → START TRAINING
-   - Watch telemetry graphs for loss curves
+   - Filter by type (quad/triplet/pair/single) or extension in Census panel
+   - Choose active lobe → START TRAINING
+   - Monitor loss/telemetry in **Telemetry** tab
 
-3. **Create Lectures (Lecture Factory)**
+4. **Create Lectures (Lecture Factory)**
    - Put PDFs/textbooks in a folder
-   - Open **Lecture Factory** plugin
+   - Open **Lecture Factory**
    - Scan folder → START PRODUCTION
-   - Outputs: sliced PNG slides + MP3 narration + TXT transcripts (perfect paired data for training)
+   - Outputs structured slices (PNG slides + MP3 narration + TXT) ready for training
 
-4. **Create Video Timelines (Video Timeline Factory)**
-   - Put videos (with optional .srt subtitles) in a folder
+5. **Create Video Timelines (Video Timeline Factory)**
+   - Put videos (optional .srt subtitles) in folder
    - Open **Video Timeline Factory**
-   - Set FPS/audio context → START PRODUCTION
-   - Outputs: timed PNG frames + WAV clips + TXT subtitles (triplets ready for training)
+   - Set extract FPS/audio seconds → START PRODUCTION
+   - Outputs timed triplets (PNG frame + WAV clip + TXT subtitle)
 
-5. **Generate Comics/Dreams**
-   - Use **Comic Factory** for story → panel generation
-   - **Dream State** for free-running consolidation/hallucination
+6. **Generate Comics/Dreams**
+   - **Comic Factory**: Story prompt → multi-panel generation
+   - **Dream State**: Free-run consolidation/hallucination on chaos buffer
+   - **Playground**: Chat/generate with active lobe
 
 ### Author
 Created and maintained by **Frederick von Rönge**  
