@@ -69,6 +69,12 @@ Built solo in 2025–2026 on a single RTX 3080 Ti.
    - **Dream State**: Free-run consolidation/hallucination on chaos buffer
    - **Playground**: Chat/generate with active lobe
 
+### Requirements
+- Python 3.10+
+- PyTorch (with CUDA/MPS for GPU)
+- Other libs: tkinter, torchvision, torchaudio, pymupdf, magvit2-pytorch, etc.
+Install via: `pip install torch torchvision torchaudio pymupdf magvit2-pytorch`
+
 ### Author
 Created and maintained by **Frederick von Rönge**  
 - GitHub: [@vonronge](https://github.com/vonronge)  
