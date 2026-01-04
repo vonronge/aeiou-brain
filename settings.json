@@ -2,8 +2,8 @@
   "system_name": "AEIOU_v16",
   "ui_scale": 1.65,
   "colors": {
-    "BG_MAIN": "#0b0f19",
-    "BG_CARD": "#131620",
+    "BG_MAIN": "#111728",
+    "BG_CARD": "#1a233e",
     "FG_TEXT": "#E3E3E3",
     "FG_DIM": "#8e9198",
     "ACCENT": "#A8C7FA",
@@ -38,7 +38,7 @@
     "tab_comic",
     "tab_graphs",
     "tab_pdf_repair",
-    "tab_settings",
-    "tab_lecture_factory"
+    "tab_lecture_factory",
+    "tab_settings"
   ]
 }
