@@ -82,7 +82,7 @@ class Plugin:
         fr_log = ttk.LabelFrame(panel, text="Hippocampal Activity", padding=10)
         fr_log.pack(fill="both", expand=True, pady=5)
 
-        self.log_box = tk.Text(fr_log, font=("Consolas", 10), bg=self.app.colors["BG_MAIN"],
+        self.log_box = tk.Text(fr_log, font=("Consolas", int(10 * getattr(self.app, 'ui_scale', 1.0))), bg=self.app.colors["BG_MAIN"],
                                fg=self.app.colors["FG_TEXT"], state="disabled")
         self.log_box.pack(side="left", fill="both", expand=True)
 

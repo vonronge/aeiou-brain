@@ -108,7 +108,7 @@ class Plugin:
         log_fr = ttk.LabelFrame(self.parent, text="Activity Log", padding=10)
         log_fr.pack(fill="both", expand=True, padx=20, pady=10)
 
-        self.log_box = tk.Text(log_fr, font=("Consolas", 9), bg=self.app.colors["BG_MAIN"],
+        self.log_box = tk.Text(log_fr, font=("Consolas", int(9 * getattr(self.app, 'ui_scale', 1.0))), bg=self.app.colors["BG_MAIN"],
                                fg=self.app.colors["FG_TEXT"])
         self.log_box.pack(side="left", fill="both", expand=True)
 

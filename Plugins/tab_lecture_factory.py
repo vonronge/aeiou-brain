@@ -20,7 +20,6 @@ import os
 import threading
 import pyttsx3
 import re
-from PIL import Image, ImageTk
 from datetime import datetime
 
 
@@ -28,194 +27,224 @@ class Plugin:
     def __init__(self, parent, app):
         self.parent = parent
         self.app = app
-        self.name = "Lecture Factory"  # Canonical Name
+        self.name = "Lecture Factory"
 
         # State
         self.is_processing = False
         self.stop_requested = False
-        self.queue = []
+        self.pdf_queue = []
 
         # Config
-        self.input_file = tk.StringVar()
+        self.input_folder = tk.StringVar()
         self.output_folder = tk.StringVar(value="D:/Training_Data/Lectures")
-        self.dpi = tk.IntVar(value=150)  # Quality of page render
+        self.dpi = tk.IntVar(value=150)
         self.generate_audio = tk.BooleanVar(value=True)
-        self.prefix = tk.StringVar(value="")
 
         self._setup_ui()
 
     def _setup_ui(self):
-        # --- INPUT / OUTPUT ---
-        fr_io = ttk.LabelFrame(self.parent, text="Source Material (PDF Textbooks)", padding=10)
+        # --- TOP: PATHS ---
+        fr_io = ttk.LabelFrame(self.parent, text="Library Paths", padding=10)
         fr_io.pack(fill="x", padx=10, pady=5)
 
-        # Input PDF
+        # Source Folder
         r1 = ttk.Frame(fr_io);
         r1.pack(fill="x", pady=2)
-        ttk.Label(r1, text="PDF File:").pack(side="left", width=10)
-        ttk.Entry(r1, textvariable=self.input_file).pack(side="left", fill="x", expand=True, padx=5)
-        ttk.Button(r1, text="Browse", width=8, command=self._browse_input).pack(side="left")
+        ttk.Label(r1, text="Source Folder:", width=12).pack(side="left")
+        ttk.Entry(r1, textvariable=self.input_folder).pack(side="left", fill="x", expand=True, padx=5)
+        ttk.Button(r1, text="📂", width=4, command=self._browse_input).pack(side="left")
 
         # Output Folder
         r2 = ttk.Frame(fr_io);
         r2.pack(fill="x", pady=2)
-        ttk.Label(r2, text="Output:").pack(side="left", width=10)
+        ttk.Label(r2, text="Output Root:", width=12).pack(side="left")
         ttk.Entry(r2, textvariable=self.output_folder).pack(side="left", fill="x", expand=True, padx=5)
-        ttk.Button(r2, text="Browse", width=8, command=self._browse_output).pack(side="left")
+        ttk.Button(r2, text="📂", width=4, command=self._browse_output).pack(side="left")
 
-        # Prefix
-        r3 = ttk.Frame(fr_io);
-        r3.pack(fill="x", pady=2)
-        ttk.Label(r3, text="Prefix:").pack(side="left", width=10)
-        ttk.Entry(r3, textvariable=self.prefix, placeholder="e.g. physics_101").pack(side="left", fill="x", expand=True,
-                                                                                     padx=5)
+        # --- MID: SCANNER & LIST ---
+        fr_scan = ttk.Frame(self.parent)
+        fr_scan.pack(fill="both", expand=True, padx=10, pady=5)
 
-        # --- SETTINGS ---
-        fr_set = ttk.LabelFrame(self.parent, text="Processing Options", padding=10)
-        fr_set.pack(fill="x", padx=10, pady=5)
+        # Controls Row
+        ctrl_row = ttk.Frame(fr_scan)
+        ctrl_row.pack(fill="x", pady=5)
 
-        ttk.Checkbutton(fr_set, text="Generate Audio (TTS Narration)", variable=self.generate_audio).pack(side="left",
-                                                                                                          padx=10)
+        ttk.Button(ctrl_row, text="1. SCAN FOR PDFS", command=self._scan_folder).pack(side="left", fill="x",
+                                                                                      expand=True, padx=(0, 5))
 
-        ttk.Label(fr_set, text="| Image Quality (DPI):").pack(side="left", padx=(20, 5))
-        ttk.Spinbox(fr_set, from_=72, to=300, textvariable=self.dpi, width=5).pack(side="left")
+        ttk.Label(ctrl_row, text="Quality (DPI):").pack(side="left")
+        ttk.Spinbox(ctrl_row, from_=72, to=300, textvariable=self.dpi, width=5).pack(side="left", padx=5)
 
-        # --- CONTROLS ---
+        ttk.Checkbutton(ctrl_row, text="Generate Audio (TTS)", variable=self.generate_audio).pack(side="left", padx=10)
+
+        # Treeview for Queue
+        cols = ("Filename", "Pages", "Status")
+        self.tree = ttk.Treeview(fr_scan, columns=cols, show="headings", height=8)
+        self.tree.heading("Filename", text="Filename")
+        self.tree.heading("Pages", text="Pages")
+        self.tree.heading("Status", text="Status")
+        self.tree.column("Filename", width=300)
+        self.tree.column("Pages", width=80, anchor="center")
+        self.tree.column("Status", width=120, anchor="center")
+
+        sb = ttk.Scrollbar(fr_scan, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+
+        self.tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        # --- BOTTOM: ACTION ---
         fr_run = ttk.Frame(self.parent, padding=10)
         fr_run.pack(fill="x", pady=5)
 
-        self.btn_run = ttk.Button(fr_run, text="START EXTRACTION", command=self._start_processing)
+        self.btn_run = ttk.Button(fr_run, text="2. START FACTORY", command=self._start_processing, state="disabled")
         self.btn_run.pack(side="left", fill="x", expand=True, padx=5)
 
         self.progress = ttk.Progressbar(fr_run, orient="horizontal", mode="determinate")
         self.progress.pack(side="left", fill="x", expand=True, padx=5)
 
-        # --- LOG ---
-        fr_log = ttk.LabelFrame(self.parent, text="Factory Log", padding=10)
-        fr_log.pack(fill="both", expand=True, padx=10, pady=10)
-
-        # Autoscroll toggle
-        self.auto_scroll = tk.BooleanVar(value=True)
-        ttk.Checkbutton(fr_log, text="Autoscroll", variable=self.auto_scroll).pack(anchor="e")
-
-        self.log_box = tk.Text(fr_log, height=10, font=("Consolas", 9),
-                               bg=self.app.colors["BG_MAIN"], fg=self.app.colors["FG_TEXT"],
-                               borderwidth=0)
-        self.log_box.pack(side="left", fill="both", expand=True)
-
-        sb = ttk.Scrollbar(fr_log, orient="vertical", command=self.log_box.yview)
-        self.log_box.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
-
-        # Tags
-        self.log_box.tag_config("info", foreground=self.app.colors["ACCENT"])
-        self.log_box.tag_config("success", foreground=self.app.colors["SUCCESS"])
-        self.log_box.tag_config("error", foreground=self.app.colors["ERROR"])
+        # Log
+        self.log_lbl = ttk.Label(self.parent, text="Ready.", foreground=self.app.colors["FG_DIM"], anchor="w")
+        self.log_lbl.pack(fill="x", padx=15, pady=(0, 10))
 
     # --- ACTIONS ---
     def _browse_input(self):
-        f = filedialog.askopenfilename(filetypes=[("PDF Files", "*.pdf")])
-        if f:
-            self.input_file.set(f)
-            # Auto-set prefix based on filename
-            name = os.path.splitext(os.path.basename(f))[0]
-            name = re.sub(r'[^a-zA-Z0-9]', '_', name).lower()
-            self.prefix.set(name)
+        d = filedialog.askdirectory()
+        if d: self.input_folder.set(d)
 
     def _browse_output(self):
         d = filedialog.askdirectory()
         if d: self.output_folder.set(d)
 
-    def _log(self, msg, tag="info"):
-        ts = datetime.now().strftime('%H:%M:%S')
-        self.log_box.insert(tk.END, f"[{ts}] {msg}\n", tag)
-        if self.auto_scroll.get():
-            self.log_box.see(tk.END)
+    def _log(self, msg):
+        self.log_lbl.config(text=msg)
+        self.parent.update_idletasks()
+
+    def _scan_folder(self):
+        folder = self.input_folder.get()
+        if not os.path.exists(folder):
+            messagebox.showerror("Error", "Source folder not found.")
+            return
+
+        self.tree.delete(*self.tree.get_children())
+        self.pdf_queue = []
+
+        count = 0
+        for f in os.listdir(folder):
+            if f.lower().endswith(".pdf"):
+                full_path = os.path.join(folder, f)
+                try:
+                    # Quick open to count pages
+                    doc = fitz.open(full_path)
+                    pages = len(doc)
+                    doc.close()
+
+                    self.tree.insert("", "end", iid=full_path, values=(f, pages, "Queued"))
+                    self.pdf_queue.append(full_path)
+                    count += 1
+                except:
+                    pass
+
+        self._log(f"Found {count} PDFs.")
+        if count > 0:
+            self.btn_run.config(state="normal")
 
     def _start_processing(self):
         if self.is_processing:
             self.stop_requested = True
             self.btn_run.config(text="STOPPING...")
         else:
-            if not os.path.exists(self.input_file.get()):
-                messagebox.showerror("Error", "Input file not found.")
-                return
+            if not self.pdf_queue: return
 
             self.is_processing = True
             self.stop_requested = False
-            self.btn_run.config(text="STOP")
+            self.btn_run.config(text="STOP FACTORY")
             threading.Thread(target=self._worker, daemon=True).start()
 
     def _worker(self):
-        pdf_path = self.input_file.get()
         out_root = self.output_folder.get()
-        prefix = self.prefix.get()
+        if not os.path.exists(out_root): os.makedirs(out_root)
 
-        try:
-            doc = fitz.open(pdf_path)
-            total = len(doc)
-            self.progress["maximum"] = total
+        # Setup TTS Engine
+        engine = None
+        if self.generate_audio.get():
+            try:
+                engine = pyttsx3.init()
+                engine.setProperty('rate', 150)
+            except Exception as e:
+                print(f"TTS Init Error: {e}")
 
-            # Setup TTS Engine
-            engine = None
-            if self.generate_audio.get():
-                try:
-                    engine = pyttsx3.init()
-                    engine.setProperty('rate', 150)
-                except Exception as e:
-                    self.parent.after(0, lambda: self._log(f"TTS Init Error: {e}", "error"))
+        total_files = len(self.pdf_queue)
 
-            if not os.path.exists(out_root): os.makedirs(out_root)
+        for idx, pdf_path in enumerate(self.pdf_queue):
+            if self.stop_requested: break
 
-            self.parent.after(0, lambda: self._log(f"Starting extraction of {total} pages...", "info"))
+            filename = os.path.basename(pdf_path)
+            book_name = os.path.splitext(filename)[0]
+            # Sanitize folder name
+            safe_book_name = re.sub(r'[^a-zA-Z0-9]', '_', book_name)
 
-            for i, page in enumerate(doc):
-                if self.stop_requested: break
+            # Create Book Subfolder
+            book_dir = os.path.join(out_root, f"{safe_book_name}_lecture")
+            if not os.path.exists(book_dir): os.makedirs(book_dir)
 
-                # Filename scheme: prefix_p0001
-                fname = f"{prefix}_p{str(i + 1).zfill(4)}"
-                base_path = os.path.join(out_root, fname)
+            self.parent.after(0, lambda p=pdf_path: self.tree.set(p, "Status", "Processing..."))
+            self._log(f"Processing book {idx + 1}/{total_files}: {filename}")
 
-                # 1. EXTRACT TEXT
-                text = page.get_text("text").strip()
+            try:
+                doc = fitz.open(pdf_path)
+                total_pages = len(doc)
 
-                # Save Text
-                with open(base_path + ".txt", "w", encoding="utf-8") as f:
-                    f.write(text)
+                for i, page in enumerate(doc):
+                    if self.stop_requested: break
 
-                # 2. EXTRACT IMAGE (Visual)
-                pix = page.get_pixmap(dpi=self.dpi.get())
-                pix.save(base_path + ".png")
+                    # Naming Scheme: BookName_p0001
+                    fname = f"{safe_book_name}_p{str(i + 1).zfill(4)}"
+                    base_path = os.path.join(book_dir, fname)
 
-                # 3. GENERATE AUDIO (Audio)
-                if engine and text:
-                    clean_text = " ".join(text.split())
-                    if len(clean_text) > 5:
-                        try:
-                            # Note: pyttsx3 is blocking. In a thread this is fine,
-                            # but extensive use might lag if not careful.
-                            engine.save_to_file(clean_text, base_path + ".wav")
-                            engine.runAndWait()
-                        except Exception as e:
-                            print(f"Audio Gen Fail: {e}")
+                    # 0. Check Exists (Skip Logic)
+                    if os.path.exists(base_path + ".txt") and \
+                            os.path.exists(base_path + ".png"):
+                        continue
 
-                # Update UI
-                self.parent.after(0, lambda v=i + 1: self.progress.configure(value=v))
+                    # 1. EXTRACT TEXT
+                    text = page.get_text("text").strip()
+                    with open(base_path + ".txt", "w", encoding="utf-8") as f:
+                        f.write(text)
 
-                if i % 5 == 0:
-                    self.parent.after(0, lambda n=i + 1: self._log(f"Processed Page {n}/{total}", "info"))
+                    # 2. EXTRACT IMAGE
+                    pix = page.get_pixmap(dpi=self.dpi.get())
+                    pix.save(base_path + ".png")
 
-            self.parent.after(0, lambda: self._log("Extraction Complete.", "success"))
+                    # 3. GENERATE AUDIO
+                    if engine and text:
+                        clean_text = " ".join(text.split())
+                        if len(clean_text) > 5:
+                            try:
+                                # Note: pyttsx3 saves as WAV by default
+                                engine.save_to_file(clean_text, base_path + ".wav")
+                                engine.runAndWait()
+                            except Exception as e:
+                                print(f"Audio Error: {e}")
 
-        except Exception as e:
-            self.parent.after(0, lambda err=str(e): self._log(f"CRITICAL ERROR: {err}", "error"))
-            import traceback
-            traceback.print_exc()
-        finally:
-            self.is_processing = False
-            self.parent.after(0, lambda: self.btn_run.config(text="START EXTRACTION"))
+                    # UI Pulse
+                    if i % 5 == 0:
+                        pct = ((i + 1) / total_pages) * 100
+                        self.parent.after(0, lambda v=pct: self.progress.configure(value=v))
+                        self.parent.after(0, lambda
+                            m=f"Book {idx + 1}/{total_files} | Page {i + 1}/{total_pages}": self._log(m))
+
+                doc.close()
+                self.parent.after(0, lambda p=pdf_path: self.tree.set(p, "Status", "Done"))
+
+            except Exception as e:
+                print(f"Error on {filename}: {e}")
+                self.parent.after(0, lambda p=pdf_path: self.tree.set(p, "Status", "Error"))
+
+        self.is_processing = False
+        self.parent.after(0, lambda: self.btn_run.config(text="2. START FACTORY"))
+        self.parent.after(0, lambda: self._log("Factory Run Complete."))
+        self.parent.after(0, lambda: self.progress.configure(value=0))
 
     def on_theme_change(self):
-        c = self.app.colors
-        if hasattr(self, 'log_box'):
-            self.log_box.config(bg=c["BG_MAIN"], fg=c["FG_TEXT"])
+        pass

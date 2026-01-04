@@ -99,7 +99,7 @@ class Plugin:
         tool_fr.pack(fill="x")
         ttk.Checkbutton(tool_fr, text="Autoscroll", variable=self.auto_scroll).pack(side="right")
 
-        self.log_box = tk.Text(bot_frame, font=("Consolas", 9), height=15,
+        self.log_box = tk.Text(bot_frame, font=("Consolas", int(9 * getattr(self.app, 'ui_scale', 1.0))), height=15,
                                bg=self.app.colors["BG_MAIN"], fg=self.app.colors["FG_TEXT"], borderwidth=0)
         self.log_box.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(bot_frame, orient="vertical", command=self.log_box.yview)

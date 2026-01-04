@@ -148,7 +148,7 @@ class Plugin:
             color = self.app.colors["BORDER"]
             canvas.create_line(offset_x, y, width, y, fill=color, dash=(2, 2), tags="grid")
             canvas.create_text(offset_x - 5, y, text=f"{val:.2f}", fill=self.app.colors["FG_DIM"], anchor="e",
-                               font=("Consolas", 8), tags="grid")
+                               font=("Consolas", int(8 * getattr(self.app, 'ui_scale', 1.0))), tags="grid")
 
         # Axes
         canvas.create_line(offset_x, 20, offset_x, height - 20, fill=self.app.colors["FG_DIM"], width=1, tags="grid")
@@ -287,7 +287,7 @@ class Plugin:
                 if pl_coords:
                     self.canv_aux.create_line(pl_coords, fill=self.app.colors["WARN"], width=2, dash=(4, 2))
                     self.canv_aux.create_text(w_aux - 10, 20, text=pl_text, fill=self.app.colors["WARN"],
-                                              anchor="ne", font=("Consolas", 9))
+                                              anchor="ne", font=("Consolas", int(9 * getattr(self.app, 'ui_scale', 1.0))))
 
                 if len(act_coords) > 2:
                     self.canv_aux.create_line(act_coords, fill=self.app.colors["SUCCESS"], width=2)

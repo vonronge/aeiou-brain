@@ -53,7 +53,7 @@ class Plugin:
             ttk.Checkbutton(mem_fr, text=f"Lobe {i}", variable=self.members[i]).pack(side="left", padx=5)
 
         # Chat
-        self.chat = tk.Text(self.parent, font=("Consolas", 11), wrap="word",
+        self.chat = tk.Text(self.parent, font=("Consolas", int(11 * getattr(self.app, 'ui_scale', 1.0))), wrap="word",
                             bg=self.app.colors["BG_MAIN"], fg=self.app.colors["FG_TEXT"],
                             borderwidth=0, padx=20, pady=20)
         self.chat.pack(fill="both", expand=True, padx=20, pady=10)

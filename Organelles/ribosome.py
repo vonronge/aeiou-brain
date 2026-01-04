@@ -39,6 +39,7 @@ ImageFile.LOAD_TRUNCATED_IMAGES = True
 # --- CODEC IMPORTS ---
 try:
     from magvit2_pytorch import MagViT2
+
     HAS_MAGVIT = True
 except ImportError:
     HAS_MAGVIT = False
@@ -46,12 +47,14 @@ except ImportError:
 
 try:
     from torchaudio.models import encodec_model_24khz
+
     HAS_ENCODEC = True
 except ImportError:
     HAS_ENCODEC = False
 
 try:
     import cv2
+
     HAS_OPENCV = True
 except ImportError:
     HAS_OPENCV = False
@@ -66,6 +69,7 @@ warnings.filterwarnings("ignore")
 
 class RibosomeConfig:
     """Central configuration for sensory resolutions"""
+
     def __init__(self):
         self.image_size = 256
         self.clip_frames = 16
@@ -77,7 +81,7 @@ class Organelle_Ribosome:
         self.device = device
         self.config = RibosomeConfig()
 
-        print(f" > Ribosome v24.0 (Physics-Aware) initializing on {device}...")
+        print(f" > Ribosome v24.1 (Physics-Aware) initializing on {device}...")
 
         # Visual Cortex (feature extractor)
         weights = ViT_B_16_Weights.DEFAULT
@@ -110,7 +114,7 @@ class Organelle_Ribosome:
             try:
                 spatial_tokens = (self.config.image_size // self.config.patch_size) ** 2
                 self.magvit = MagViT2(
-                    codebook_size=self.image_vocab_size,
+                    num_codes=self.image_vocab_size,  # FIXED ARGUMENT NAME
                     image_size=self.config.image_size,
                     dim=512,
                     depth=8,
@@ -225,47 +229,38 @@ class Organelle_Ribosome:
             with open(path, 'r') as f:
                 data = json.load(f)
 
-            # Extract [dx, dy] flow vector
             vec = data.get("control_vec", [0.0, 0.0])
 
-            # Map into the 64D Control Channel
-            # C[0] = dX
-            # C[1] = dY
-            # C[2..63] = 0.0 (Reserved for future sensors)
             t = torch.zeros(1, 1, 64)
             t[0, 0, 0] = float(vec[0])
             t[0, 0, 1] = float(vec[1])
 
             return t.to(self.device)
         except Exception as e:
-            # print(f"Control Load Warning {path}: {e}")
             return torch.zeros(1, 1, 64).to(self.device)
 
     # --- INGESTION ---
     def ingest_packet(self, packet):
         v, a, t, c, kept_idx = None, None, None, None, None
 
-        # 1. TEXT
         if 't' in packet:
             with open(packet['t'], 'r', encoding='utf-8', errors='ignore') as f:
                 content = f.read()
             toks = self._tokenize(content)
             t = torch.tensor(toks).unsqueeze(0).to(self.device)
 
-        # 2. CONTROL (PHYSICS)
         if 'c' in packet and packet['c']:
             c = self._load_control(packet['c'])
         else:
             c = torch.zeros(1, 1, 64).to(self.device)
 
-        # 3. IMAGE HANDLING
         if 'v' in packet and packet['v'] and self.magvit:
             try:
                 img = Image.open(packet['v']).convert('RGB')
                 img = img.resize((self.config.image_size, self.config.image_size))
 
-                # MagViT Tokenization
-                tens = torch.tensor(np.array(img)).permute(2, 0, 1).float().div(127.5).sub(1).unsqueeze(0).unsqueeze(2).to(self.device)
+                tens = torch.tensor(np.array(img)).permute(2, 0, 1).float().div(127.5).sub(1).unsqueeze(0).unsqueeze(
+                    2).to(self.device)
 
                 with torch.no_grad():
                     if hasattr(self.magvit, 'tokenize'):
@@ -281,17 +276,14 @@ class Organelle_Ribosome:
                 else:
                     t = img_tokens.unsqueeze(0)
 
-                # ViT Feature Extraction
                 with torch.no_grad():
                     px = self.visual_transform(img).unsqueeze(0).to(self.device)
                     full_vis = self.retina(px)
                     v, kept_idx = self.thalamus(full_vis)
 
             except Exception as e:
-                # print(f"[Ribosome] Image Skip {packet['v']}: {e}")
                 pass
 
-        # 4. AUDIO HANDLING
         audio_src = packet.get('a')
         if audio_src and self.encodec:
             try:
@@ -312,16 +304,12 @@ class Organelle_Ribosome:
             except:
                 pass
 
-        # DEFAULTS
         if v is None: v = torch.zeros(1, 1, 768).to(self.device)
         if a is None: a = torch.zeros(1, 1, 128).to(self.device)
         if t is None: t = torch.tensor([[50256]]).to(self.device)
 
-        # c is already handled above
-
         return v, a, t, c, kept_idx
 
-    # --- LEGACY WRAPPERS ---
     def render_text_to_image(self, text):
         return Image.new('RGB', (100, 100))
 
@@ -329,4 +317,10 @@ class Organelle_Ribosome:
         return None
 
     def ingest_doc(self, p):
+        return self.ingest_packet({'t': p})
+
+    def ingest_cbz(self, p):
+        return self.ingest_packet({'t': p})
+
+    def ingest(self, p):
         return self.ingest_packet({'t': p})

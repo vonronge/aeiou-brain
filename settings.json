@@ -54,7 +54,8 @@
     "tab_comic",
     "tab_graphs",
     "tab_pdf_repair",
-    "tab_settings"
+    "tab_settings",
+    "tab_lecture_factory"
   ],
   "ui_scale": 1.65,
   "data_dir": "D:\\AEIOU_Brain\\Training_Data",

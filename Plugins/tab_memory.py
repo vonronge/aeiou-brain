@@ -55,7 +55,7 @@ class Plugin:
         right = ttk.LabelFrame(pane, text="Entity Node Viewer")
         pane.add(right, weight=3)
 
-        self.txt_editor = tk.Text(right, font=("Consolas", 10), bg="#1E1E1E", fg="#A8C7FA", insertbackground="white")
+        self.txt_editor = tk.Text(right, font=("Consolas", int(10 * getattr(self.app, 'ui_scale', 1.0))), bg="#1E1E1E", fg="#A8C7FA", insertbackground="white")
         self.txt_editor.pack(fill="both", expand=True, padx=5, pady=5)
 
         # Controls

@@ -63,7 +63,7 @@ class Plugin:
         sb = ttk.Scrollbar(chat_frame)
         sb.pack(side="right", fill="y")
 
-        self.chat_box = tk.Text(chat_frame, font=("Consolas", 11), bg=self.app.colors["BG_CARD"],
+        self.chat_box = tk.Text(chat_frame, font=("Consolas", int(11 * getattr(self.app, 'ui_scale', 1.0))), bg=self.app.colors["BG_CARD"],
                                 fg=self.app.colors["FG_TEXT"], wrap="word", padx=10, pady=10,
                                 yscrollcommand=sb.set, borderwidth=0, highlightthickness=0)
         self.chat_box.pack(side="left", fill="both", expand=True)

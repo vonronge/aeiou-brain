@@ -117,7 +117,7 @@ class Plugin:
         fr_vis = ttk.LabelFrame(right, text="The Mind's Eye", padding=10)
         fr_vis.pack(fill="both", expand=True, pady=5)
 
-        self.txt_out = tk.Text(fr_vis, font=("Consolas", 11), bg=self.app.colors["BG_MAIN"],
+        self.txt_out = tk.Text(fr_vis, font=("Consolas", int(11 * getattr(self.app, 'ui_scale', 1.0))), bg=self.app.colors["BG_MAIN"],
                                fg=self.app.colors["FG_TEXT"], wrap="word", padx=15, pady=15, borderwidth=0)
         self.txt_out.pack(fill="both", expand=True)
 

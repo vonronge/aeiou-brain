@@ -109,7 +109,7 @@ class Plugin:
         self.btn_run.pack(fill="x", pady=10)
 
         # --- RIGHT PANEL ---
-        self.log_box = tk.Text(right, font=("Consolas", 10), bg="#1E1E1E", fg="#D4D4D4", borderwidth=0)
+        self.log_box = tk.Text(right, font=("Consolas", int(10 * getattr(self.app, 'ui_scale', 1.0))), bg="#1E1E1E", fg="#D4D4D4", borderwidth=0)
         self.log_box.pack(fill="both", expand=True)
 
         self.log_box.tag_config("sys", foreground="#569CD6")

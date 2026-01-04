@@ -403,21 +403,47 @@ class BrainApp(tk.Tk):
             print(f"Sidebar Save Error: {e}")
 
     def _restore_sidebar_order(self):
+        """
+        Merges the saved order from settings.json with any newly discovered plugins.
+        If new plugins are found, it auto-saves the updated order immediately.
+        """
         try:
             if not os.path.exists(CONFIG_FILE): return
+
             with open(CONFIG_FILE, 'r') as f:
                 data = json.load(f)
-            saved = data.get("sidebar_order", [])
-            if not saved: return
-            new_order = []
-            for name in saved:
+
+            saved_order_names = data.get("sidebar_order", [])
+            if not saved_order_names: return
+
+            new_order_btns = []
+
+            # 1. Reconstruct order from settings (if plugins are currently loaded)
+            for name in saved_order_names:
                 if name in self.sidebar_buttons:
-                    new_order.append(self.sidebar_buttons[name])
-            for btn in self.sidebar_order:
-                if btn not in new_order: new_order.append(btn)
-            self.sidebar_order = new_order
-        except:
-            pass
+                    new_order_btns.append(self.sidebar_buttons[name])
+
+            # 2. Check for NEW or MISSING plugins (The Discovery Step)
+            # Iterate through all currently loaded buttons (which includes new ones)
+            # and append them if they weren't in the saved list.
+            new_discovery = False
+
+            for name, btn in self.sidebar_buttons.items():
+                if btn not in new_order_btns:
+                    print(f"[GUI] New Plugin Found: {name} -> Adding to sidebar.")
+                    new_order_btns.append(btn)
+                    new_discovery = True
+
+            # 3. Apply the merged order
+            self.sidebar_order = new_order_btns
+
+            # 4. Auto-Save immediately so it persists next time
+            if new_discovery:
+                print("[GUI] Syncing settings.json with new plugins...")
+                self._save_sidebar_order()
+
+        except Exception as e:
+            print(f"[GUI] Sidebar Restore Error: {e}")
 
     def _load_single_lobe(self, lobe_id, path, silent=False):
         try:
