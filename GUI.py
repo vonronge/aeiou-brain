@@ -23,7 +23,6 @@ import importlib.util
 import traceback
 import torch
 
-# --- ORGANELLIZATION IMPORTS ---
 try:
     from Organelles.golgi import Organelle_Golgi
     from Organelles.phagus import Organelle_Phagus
@@ -39,21 +38,14 @@ except ImportError as e:
     sys.exit(1)
 
 
-# --- UI HELPERS ---
 class DraggableButton(tk.Button):
     def __init__(self, parent, app, text, command):
-        # Scale padding/font with UI scale
         scale = getattr(app, 'ui_scale', 1.0)
-        font_size = int(11 * scale)
-        padx = int(15 * scale)
-        pady = int(8 * scale)
-
         super().__init__(parent, text=text, command=command,
-                         font=("Segoe UI", font_size), relief="flat", anchor="w",
-                         padx=padx, pady=pady, cursor="hand2")
+                         font=("Segoe UI", int(11 * scale)), relief="flat", anchor="w",
+                         padx=int(15 * scale), pady=int(8 * scale), cursor="hand2")
         self.parent = parent
         self.app = app
-        self.text_val = text
         self.command_func = command
         self._drag_data = {"y": 0}
         self.bind("<Button-1>", self._on_drag_start)
@@ -76,7 +68,7 @@ class DraggableButton(tk.Button):
                 self.app.sidebar_order[my_idx], self.app.sidebar_order[target_idx] = \
                     self.app.sidebar_order[target_idx], self.app.sidebar_order[my_idx]
                 self.app._repack_sidebar()
-            except ValueError:
+            except:
                 pass
 
     def _on_drag_stop(self, event):
@@ -93,26 +85,24 @@ class BrainApp(tk.Tk):
                 pass
 
         super().__init__()
-        self.title("AEIOU Brain - The Unified Cortex (v24.15 Font Fix)")
+        self.title("AEIOU Brain - The Unified Cortex (v24.3 Stable)")
 
         if os.name == 'nt':
             try:
                 self.update()
                 import ctypes
-                # Enable dark title bar
                 ctypes.windll.dwmapi.DwmSetWindowAttribute(
                     ctypes.windll.user32.GetParent(self.winfo_id()), 20, ctypes.byref(ctypes.c_int(2)), 4
                 )
             except:
                 pass
 
-        # 2. INITIALIZE ORGANELLES
+        # ORGANELLES
         self.golgi = Organelle_Golgi()
         self.golgi.info("Brain Stem Initializing...", source="Cortex")
 
         root_dir = os.path.dirname(os.path.abspath(__file__))
         self.phagus = Organelle_Phagus(root_dir)
-
         self.paths = self.phagus.get_paths()
         self.colors = self.phagus.get_theme()
         self.ui_scale = self.phagus.state.ui_scale
@@ -123,7 +113,6 @@ class BrainApp(tk.Tk):
             self.device = "mps"
         else:
             self.device = "cpu"
-
         self.gpu_lock = threading.Lock()
         self.golgi.info(f"Hardware: {self.device.upper()}", source="Cortex")
 
@@ -146,21 +135,10 @@ class BrainApp(tk.Tk):
 
         self.reticulum = Organelle_Reticulum(self.hippocampus, self.golgi)
 
-        self.symbiont = Organelle_Symbiont(
-            device=self.device,
-            ribosome=self.ribosome,
-            golgi=self.golgi,
-            memories_path=self.paths["memories"]
-        )
+        self.symbiont = Organelle_Symbiont(self.device, self.ribosome, self.golgi, self.paths["memories"])
+        self.cytosis = Organelle_Cytosis(self.device, self.ribosome, self.phagus, self.golgi)
 
-        self.cytosis = Organelle_Cytosis(
-            device=self.device,
-            ribosome=self.ribosome,
-            phagus=self.phagus,
-            golgi=self.golgi
-        )
-
-        # 3. STATE COMPATIBILITY
+        # STATE
         self.active_lobe = tk.IntVar(value=self.phagus.state.last_active_lobe)
         self.graph_data = {}
         self.plugins = {}
@@ -169,17 +147,12 @@ class BrainApp(tk.Tk):
         self.sidebar_order = []
         self.lobe_btns = {}
 
-        # 4. WINDOW CONFIG
+        # UI CONFIG
         self.configure(bg=self.colors["BG_MAIN"])
-
         if self.phagus.state.window_geometry:
             self.geometry(self.phagus.state.window_geometry)
         else:
-            w, h = 1600, 900
-            x = (self.winfo_screenwidth() - w) // 2
-            y = 50
-            self.geometry(f'{w}x{h}+{int(x)}+{int(y)}')
-
+            self.geometry("1600x900")
         if self.phagus.state.window_state == 'zoomed':
             try:
                 self.state('zoomed')
@@ -187,7 +160,6 @@ class BrainApp(tk.Tk):
                 pass
 
         self.protocol("WM_DELETE_WINDOW", self._on_close)
-
         try:
             self.tk.call('tk', 'scaling', self.ui_scale)
         except:
@@ -198,7 +170,7 @@ class BrainApp(tk.Tk):
         self._load_plugins()
         self.refresh_header()
 
-    # --- PROPERTIES ---
+    # PROXIES
     @property
     def lobes(self):
         return {i: (self.lobe_manager.get_lobe(i).model if self.lobe_manager.get_lobe(i) else None) for i in
@@ -224,14 +196,11 @@ class BrainApp(tk.Tk):
         return {i: (self.lobe_manager.get_lobe(i).model_type if self.lobe_manager.get_lobe(i) else None) for i in
                 range(1, 5)}
 
-    # --- LAYOUT ---
     def _setup_layout(self):
         self.main_split = tk.Frame(self, bg=self.colors["BG_MAIN"])
         self.main_split.pack(fill="both", expand=True)
 
-        # Dynamic Sidebar Width
         sb_width = int(280 * self.ui_scale)
-
         self.sidebar_container = tk.Frame(self.main_split, bg=self.colors["BG_CARD"], width=sb_width)
         self.sidebar_container.pack(side="left", fill="y")
         self.sidebar_container.pack_propagate(False)
@@ -239,8 +208,8 @@ class BrainApp(tk.Tk):
         self.sb_scroll = ttk.Scrollbar(self.sidebar_container, orient="vertical")
         self.sb_scroll.pack(side="right", fill="y")
 
-        self.sb_canvas = tk.Canvas(self.sidebar_container, bg=self.colors["BG_CARD"],
-                                   highlightthickness=0, yscrollcommand=self.sb_scroll.set)
+        self.sb_canvas = tk.Canvas(self.sidebar_container, bg=self.colors["BG_CARD"], highlightthickness=0,
+                                   yscrollcommand=self.sb_scroll.set)
         self.sb_canvas.pack(side="left", fill="both", expand=True)
         self.sb_scroll.config(command=self.sb_canvas.yview)
 
@@ -251,20 +220,18 @@ class BrainApp(tk.Tk):
                                 lambda e: self.sb_canvas.configure(scrollregion=self.sb_canvas.bbox("all")))
         self.sb_canvas.bind("<Configure>", lambda e: self.sb_canvas.itemconfig(self.sb_window, width=e.width))
 
-        if os.name == 'nt' or sys.platform == 'darwin':
+        if os.name == 'nt':
             self.sidebar_frame.bind_all("<MouseWheel>", self._on_mousewheel)
         else:
             self.sidebar_frame.bind_all("<Button-4>", self._on_mousewheel)
             self.sidebar_frame.bind_all("<Button-5>", self._on_mousewheel)
 
-        lbl = tk.Label(self.sidebar_frame, text="NEURAL CORE", bg=self.colors["BG_CARD"],
-                       fg=self.colors["FG_DIM"], font=("Segoe UI", int(11 * self.ui_scale), "bold"),
-                       pady=int(15 * self.ui_scale))
+        lbl = tk.Label(self.sidebar_frame, text="NEURAL CORE", bg=self.colors["BG_CARD"], fg=self.colors["FG_DIM"],
+                       font=("Segoe UI", int(11 * self.ui_scale), "bold"), pady=int(15 * self.ui_scale))
         lbl.pack(fill="x")
 
         self.content_area = tk.Frame(self.main_split, bg=self.colors["BG_MAIN"])
         self.content_area.pack(side="right", fill="both", expand=True)
-
         self._setup_header()
 
         self.plugin_container = tk.Frame(self.content_area, bg=self.colors["BG_MAIN"])
@@ -275,7 +242,6 @@ class BrainApp(tk.Tk):
     def _on_mousewheel(self, event):
         x, y = self.winfo_pointerxy()
         widget = self.winfo_containing(x, y)
-        # Only scroll sidebar if mouse is over it
         if str(widget).startswith(str(self.sidebar_container)):
             if sys.platform == 'darwin':
                 self.sb_canvas.yview_scroll(int(-1 * event.delta), "units")
@@ -290,38 +256,35 @@ class BrainApp(tk.Tk):
         h_height = int(60 * self.ui_scale)
         header = tk.Frame(self.content_area, bg=self.colors["BG_MAIN"], height=h_height)
         header.pack(fill="x", side="top", pady=(0, 5))
-
         tk.Label(header, text="ACTIVE LOBE:", bg=self.colors["BG_MAIN"], fg=self.colors["ACCENT"],
                  font=("Segoe UI", int(12 * self.ui_scale), "bold")).pack(side="left", padx=15)
-
         for i in range(1, 5):
             btn = ttk.Radiobutton(header, text=f"LOBE {i}", variable=self.active_lobe, value=i, style="Lobe.TButton")
             btn.pack(side="left", padx=5)
             self.lobe_btns[i] = btn
-
-        tk.Label(header, text=f"Running on: {self.device.upper()}", bg=self.colors["BG_MAIN"],
-                 fg=self.colors["FG_DIM"], font=("Segoe UI", int(10 * self.ui_scale))).pack(side="right", padx=20)
+        tk.Label(header, text=f"Running on: {self.device.upper()}", bg=self.colors["BG_MAIN"], fg=self.colors["FG_DIM"],
+                 font=("Segoe UI", int(10 * self.ui_scale))).pack(side="right", padx=20)
 
     def _add_plugin(self, name, plugin_class):
         frame = ttk.Frame(self.plugin_container)
         frame.grid(row=0, column=0, sticky="nsew")
-        instance = plugin_class(frame, self)
-        display_name = instance.name
-        self.plugins[name] = instance
-        self.plugin_frames[name] = frame
-        btn = DraggableButton(self.sidebar_frame, self, text=display_name, command=lambda: self._show_plugin(name))
-        self.sidebar_buttons[name] = btn
-        self.sidebar_order.append(btn)
-        return instance
+        try:
+            instance = plugin_class(frame, self)
+            display_name = instance.name
+            self.plugins[name] = instance
+            self.plugin_frames[name] = frame
+            btn = DraggableButton(self.sidebar_frame, self, text=display_name, command=lambda: self._show_plugin(name))
+            self.sidebar_buttons[name] = btn
+            self.sidebar_order.append(btn)
+        except Exception as e:
+            self.golgi.error(f"Plugin Init Failed ({name}): {e}", source="GUI")
 
     def _show_plugin(self, name):
         frame = self.plugin_frames.get(name)
         if frame: frame.tkraise()
-        # Mock Notebook for compatibility with old plugins accessing self.notebook.select()
         self.notebook = type('MockNotebook', (), {})()
         self.notebook.select = lambda: name
         self.notebook.tab = lambda x, option: self.plugins[name].name if option == "text" else None
-
         for n, btn in self.sidebar_buttons.items():
             if n == name:
                 btn.config(bg=self.colors["BG_MAIN"], fg=self.colors["ACCENT"], relief="sunken")
@@ -332,70 +295,50 @@ class BrainApp(tk.Tk):
         for btn in self.sidebar_buttons.values(): btn.pack_forget()
         for btn in self.sidebar_order: btn.pack(fill="x", pady=1)
 
-    def _load_plugins(self):
-        # Order logic
-        order = [
-            "tab_cortex.py", "tab_playground.py", "tab_memory.py", "tab_memory_agent.py",
-            "tab_rlm.py", "tab_trainer.py", "tab_diffusion_trainer.py", "tab_dream.py",
-            "tab_factory.py", "tab_video_factory.py",
-            "tab_pdf_repair.py",
-            "tab_comic.py", "tab_symbiosis.py",
-            "tab_council.py", "tab_graphs.py", "tab_settings.py"
-        ]
-
-        plugins_dir = self.paths["plugins"]
-        found_files = [f for f in os.listdir(plugins_dir) if f.startswith("tab_") and f.endswith(".py")]
-        found_files.sort(key=lambda x: order.index(x) if x in order else 999)
-
-        first_plugin = None
-        for filename in found_files:
-            try:
-                module_name = filename[:-3]
-                path = os.path.join(plugins_dir, filename)
-                spec = importlib.util.spec_from_file_location(module_name, path)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-                if hasattr(module, "Plugin"):
-                    self._add_plugin(module_name, module.Plugin)
-                    if not first_plugin: first_plugin = module_name
-                    self.golgi.info(f"Loaded Plugin: {module_name}", source="GUI")
-            except Exception as e:
-                self.golgi.error(f"Failed to load {filename}: {e}", source="GUI")
-                traceback.print_exc()
-
-        self._restore_sidebar_order()
-        self._repack_sidebar()
-        if first_plugin: self._show_plugin(first_plugin)
-
     def _save_sidebar_order(self):
-        try:
-            ordered_names = []
-            btn_to_name = {v: k for k, v in self.sidebar_buttons.items()}
-            for btn in self.sidebar_order:
-                name = btn_to_name.get(btn)
-                if name: ordered_names.append(name)
-            self.phagus.state.sidebar_order = ordered_names
-            self.phagus.save()
-        except Exception as e:
-            print(f"Sidebar Save Error: {e}")
+        ordered = []
+        b2n = {v: k for k, v in self.sidebar_buttons.items()}
+        for btn in self.sidebar_order:
+            n = b2n.get(btn)
+            if n: ordered.append(n)
+        self.phagus.state.sidebar_order = ordered
+        self.phagus.save()
 
     def _restore_sidebar_order(self):
-        try:
-            saved_order = self.phagus.state.sidebar_order
-            if not saved_order: return
-            new_order_btns = []
-            for name in saved_order:
-                if name in self.sidebar_buttons:
-                    new_order_btns.append(self.sidebar_buttons[name])
+        saved = self.phagus.state.sidebar_order
+        if not saved: return
+        new_order = []
+        for name in saved:
+            if name in self.sidebar_buttons:
+                new_order.append(self.sidebar_buttons[name])
+        for name, btn in self.sidebar_buttons.items():
+            if btn not in new_order:
+                new_order.append(btn)
+        self.sidebar_order = new_order
 
-            # Append any new plugins not in saved order
-            for name, btn in self.sidebar_buttons.items():
-                if btn not in new_order_btns:
-                    new_order_btns.append(btn)
-
-            self.sidebar_order = new_order_btns
-        except Exception as e:
-            print(f"Sidebar Restore Error: {e}")
+    def _load_plugins(self):
+        plugins_dir = self.paths["plugins"]
+        if not os.path.exists(plugins_dir): return
+        core = ["tab_cortex.py", "tab_playground.py", "tab_trainer.py"]
+        files = [f for f in os.listdir(plugins_dir) if f.startswith("tab_") and f.endswith(".py")]
+        files.sort(key=lambda x: (0 if x in core else 1, x))
+        first = None
+        for f in files:
+            try:
+                mod_name = f[:-3]
+                path = os.path.join(plugins_dir, f)
+                spec = importlib.util.spec_from_file_location(mod_name, path)
+                mod = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(mod)
+                if hasattr(mod, "Plugin"):
+                    self._add_plugin(mod_name, mod.Plugin)
+                    if not first: first = mod_name
+                    self.golgi.info(f"Loaded Plugin: {mod_name}", source="GUI")
+            except Exception as e:
+                self.golgi.error(f"Failed {f}: {e}", source="GUI")
+        self._restore_sidebar_order()
+        self._repack_sidebar()
+        if first: self._show_plugin(first)
 
     def refresh_header(self):
         for i in range(1, 5):
@@ -403,120 +346,104 @@ class BrainApp(tk.Tk):
             style = "LobeLoaded.TButton" if handle else "Lobe.TButton"
             self.lobe_btns[i].configure(style=style)
 
+    def save_state(self):
+        # Renamed from persist_state back to save_state for compatibility
+        self.phagus.state.last_active_lobe = self.active_lobe.get()
+        self.phagus.state.window_geometry = self.geometry()
+        self.phagus.state.window_state = self.state()
+        self.phagus.save()
+
     def _on_close(self):
         self.golgi.warn("Shutdown Initiated...", source="System")
         if self.cytoplasm: self.cytoplasm.stop()
         if self.symbiont: self.symbiont.stop()
         if self.cytosis: self.cytosis.stop()
-        for name, plugin in self.plugins.items():
-            if hasattr(plugin, "stop_requested"): plugin.stop_requested = True
-            if hasattr(plugin, "is_running"): plugin.is_running = False
+        for p in self.plugins.values():
+            if hasattr(p, "stop_requested"): p.stop_requested = True
+            if hasattr(p, "is_running"): p.is_running = False
 
         self.save_state()
         if self.hippocampus: self.hippocampus.save_memory()
-
         self.destroy()
 
-        deadline = time.time() + 10
+        deadline = time.time() + 3
         while time.time() < deadline:
-            active = [t for t in threading.enumerate() if t is not threading.current_thread() and not t.daemon]
-            if not active: break
-            time.sleep(1)
+            if threading.active_count() <= 1: break
+            time.sleep(0.1)
         sys.exit(0)
 
     def apply_theme(self):
         style = ttk.Style()
         style.theme_use('clam')
         c = self.colors
+        s = self.ui_scale
+        base_font = ("Segoe UI", int(11 * s))
+        bold_font = ("Segoe UI", int(11 * s), "bold")
+        head_font = ("Segoe UI", int(12 * s), "bold")
+        small_font = ("Consolas", int(10 * s))
 
-        # Scale Factors
-        scale = self.ui_scale
-        base_font_size = int(11 * scale)
-        small_font_size = int(10 * scale)
-        header_font_size = int(12 * scale)
-        arrow_size = int(14 * scale)
-
-        # --- GLOBAL FONT OVERRIDE ---
-        self.option_add("*font", ("Segoe UI", base_font_size))
-
-        # --- DROPDOWN LISTBOX FONT SCALING ---
-        self.option_add("*TCombobox*Listbox.font", ("Segoe UI", base_font_size))
+        self.option_add("*font", base_font)
+        self.option_add("*TCombobox*Listbox.font", base_font)
         self.option_add("*TCombobox*Listbox.background", c["BG_CARD"])
         self.option_add("*TCombobox*Listbox.foreground", c["FG_TEXT"])
         self.option_add("*TCombobox*Listbox.selectBackground", c["ACCENT"])
         self.option_add("*TCombobox*Listbox.selectForeground", c["BG_MAIN"])
 
         style.configure(".", background=c["BG_MAIN"], foreground=c["FG_TEXT"], borderwidth=0)
-        style.configure("TLabel", background=c["BG_MAIN"], foreground=c["FG_TEXT"], font=("Segoe UI", base_font_size))
-        style.configure("Card.TLabel", background=c["BG_CARD"], foreground=c["FG_TEXT"],
-                        font=("Segoe UI", base_font_size))
+        style.configure("TLabel", background=c["BG_MAIN"], foreground=c["FG_TEXT"], font=base_font)
+        style.configure("Card.TLabel", background=c["BG_CARD"], foreground=c["FG_TEXT"], font=base_font)
 
         style.configure("TButton", background=c["BTN"], foreground=c["FG_TEXT"], borderwidth=0,
-                        padding=(int(15 * scale), int(8 * scale)), font=("Segoe UI", base_font_size, "bold"))
+                        padding=(int(15 * s), int(8 * s)), font=bold_font)
         style.map("TButton", background=[("active", c["BTN_ACT"]), ("pressed", c["ACCENT"])],
                   foreground=[("pressed", c["BG_MAIN"])])
 
-        style.configure("Lobe.TButton", background=c["BG_CARD"], foreground=c["FG_DIM"],
-                        font=("Segoe UI", header_font_size, "bold"), bordercolor=c["BORDER"], borderwidth=1)
-        style.map("Lobe.TButton", background=[("selected", c["ACCENT"]), ("active", c["BTN_ACT"])],
-                  foreground=[("selected", c["BG_MAIN"])])
-        style.configure("LobeLoaded.TButton", background=c["BG_CARD"], foreground=c["SUCCESS"],
-                        font=("Segoe UI", header_font_size, "bold"), bordercolor=c["SUCCESS"], borderwidth=1)
-        style.map("LobeLoaded.TButton", background=[("selected", c["ACCENT"]), ("active", c["BTN_ACT"])],
-                  foreground=[("selected", c["BG_MAIN"])])
+        style.configure("Lobe.TButton", background=c["BG_CARD"], foreground=c["FG_DIM"], font=head_font,
+                        bordercolor=c["BORDER"], borderwidth=1)
+        style.map("Lobe.TButton", background=[("selected", c["ACCENT"])], foreground=[("selected", c["BG_MAIN"])])
+        style.configure("LobeLoaded.TButton", background=c["BG_CARD"], foreground=c["SUCCESS"], font=head_font,
+                        bordercolor=c["SUCCESS"], borderwidth=1)
+        style.map("LobeLoaded.TButton", background=[("selected", c["ACCENT"])], foreground=[("selected", c["BG_MAIN"])])
 
         style.configure("TEntry", fieldbackground=c["BG_CARD"], foreground=c["FG_TEXT"], insertcolor=c["ACCENT"],
-                        borderwidth=1, bordercolor=c["BORDER"], padding=5, font=("Segoe UI", base_font_size))
+                        borderwidth=1, bordercolor=c["BORDER"], padding=5, font=base_font)
 
-        style.configure("TLabelframe", background=c["BG_CARD"], borderwidth=1, relief="solid", bordercolor=c["BORDER"])
-        style.configure("TLabelframe.Label", background=c["BG_CARD"], foreground=c["ACCENT"],
-                        font=("Segoe UI", base_font_size, "bold"))
+        arrow_size = int(14 * s)
+        style.configure("TSpinbox", fieldbackground=c["BG_CARD"], background=c["BTN"], foreground=c["FG_TEXT"],
+                        arrowcolor=c["FG_TEXT"], borderwidth=1, bordercolor=c["BORDER"], font=base_font,
+                        arrowsize=arrow_size)
+        style.map("TSpinbox", fieldbackground=[("readonly", c["BG_CARD"])], foreground=[("readonly", c["FG_TEXT"])])
+
+        style.configure("TCombobox", fieldbackground=c["BG_CARD"], background=c["BTN"], foreground=c["FG_TEXT"],
+                        arrowcolor=c["FG_TEXT"], borderwidth=1, font=base_font, arrowsize=arrow_size)
+        style.map("TCombobox", fieldbackground=[("readonly", c["BG_CARD"])],
+                  selectbackground=[("readonly", c["BG_CARD"])], selectforeground=[("readonly", c["FG_TEXT"])],
+                  foreground=[("readonly", c["FG_TEXT"])])
+
+        style.configure("TLabelframe", background=c["BG_CARD"], borderwidth=1, bordercolor=c["BORDER"])
+        style.configure("TLabelframe.Label", background=c["BG_CARD"], foreground=c["ACCENT"], font=bold_font)
         style.configure("Card.TFrame", background=c["BG_CARD"])
 
         style.configure("Treeview", background=c["BG_MAIN"], foreground=c["FG_TEXT"], fieldbackground=c["BG_MAIN"],
-                        borderwidth=1, bordercolor=c["BORDER"], font=("Consolas", small_font_size))
+                        borderwidth=1, bordercolor=c["BORDER"], font=small_font)
         style.configure("Treeview.Heading", background=c["BG_CARD"], foreground=c["FG_TEXT"], borderwidth=1,
-                        bordercolor=c["BORDER"], padding=10, relief="flat")
-        style.map("Treeview.Heading", background=[("active", c["BTN_ACT"])], foreground=[("active", c["ACCENT"])])
+                        bordercolor=c["BORDER"], padding=5)
+        style.map("Treeview.Heading", background=[("active", c["BTN_ACT"])])
 
         style.configure("Vertical.TScrollbar", gripcount=0, background=c["SCROLL"], troughcolor=c["BG_CARD"],
-                        bordercolor=c["BG_CARD"], lightcolor=c["BG_CARD"], darkcolor=c["BG_CARD"], arrowsize=0)
+                        bordercolor=c["BG_CARD"], arrowsize=0)
 
-        # --- FIXED CHECKBUTTON SCALING ---
-        # Explicitly set indicatorsize based on scale
-        style.configure("TCheckbutton", background=c["BG_MAIN"], foreground=c["FG_TEXT"], focuscolor=c["BG_MAIN"],
-                        font=("Segoe UI", base_font_size), indicatorsize=int(16 * scale))
+        style.configure("TCheckbutton", background=c["BG_MAIN"], foreground=c["FG_TEXT"], font=base_font,
+                        indicatorsize=int(16 * s))
         style.map("TCheckbutton", indicatorcolor=[("selected", c["ACCENT"])], background=[("active", c["BG_MAIN"])])
 
-        # --- FIXED SPINBOX/COMBOBOX ARROWS & FONT ---
-        # Arrowsize must be explicit or it stays tiny
-        style.configure("TSpinbox", fieldbackground=c["BG_CARD"], foreground=c["FG_TEXT"], background=c["BTN"],
-                        arrowcolor=c["FG_TEXT"], borderwidth=1, bordercolor=c["BORDER"],
-                        font=("Segoe UI", base_font_size), arrowsize=arrow_size)
-
-        style.map("TSpinbox", fieldbackground=[("readonly", c["BG_CARD"]), ("disabled", c["BG_MAIN"])],
-                  foreground=[("readonly", c["FG_TEXT"]), ("disabled", c["FG_DIM"])])
-
-        style.configure("TCombobox", fieldbackground=c["BG_CARD"], background=c["BTN"], foreground=c["FG_TEXT"],
-                        arrowcolor=c["FG_TEXT"], borderwidth=1,
-                        font=("Segoe UI", base_font_size), arrowsize=arrow_size)
-
-        style.map("TCombobox",
-                  fieldbackground=[("readonly", c["BG_CARD"]), ("disabled", c["BG_MAIN"])],
-                  selectbackground=[("readonly", c["BG_CARD"]), ("!readonly", c["ACCENT"])],
-                  selectforeground=[("readonly", c["FG_TEXT"]), ("!readonly", c["BG_MAIN"])],
-                  foreground=[("readonly", c["FG_TEXT"]), ("disabled", c["FG_DIM"])])
-
-        style.configure("TSeparator", background=c["BORDER"])
-
-        # Sliders
         style.configure("Horizontal.TScale", background=c["BG_MAIN"], troughcolor=c["BG_CARD"],
-                        sliderlength=int(20 * scale), sliderthickness=int(10 * scale), bordercolor=c["BG_MAIN"])
+                        sliderlength=int(20 * s), sliderthickness=int(10 * s), bordercolor=c["BG_MAIN"])
 
-        for name, plugin in self.plugins.items():
-            if hasattr(plugin, "on_theme_change"):
+        for p in self.plugins.values():
+            if hasattr(p, "on_theme_change"):
                 try:
-                    plugin.on_theme_change()
+                    p.on_theme_change()
                 except:
                     pass
 

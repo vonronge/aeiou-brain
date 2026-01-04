@@ -43,10 +43,9 @@ class DiffusionDataset:
     def __init__(self, packet_list, app, settings):
         self.packets = packet_list
         self.app = app
-        self.settings = settings  # Dict of current UI values
+        self.settings = settings
 
     def __iter__(self):
-        # Shuffle if not narrative
         indices = list(range(len(self.packets)))
         if not self.settings.get("narrative", False):
             random.shuffle(indices)
@@ -55,29 +54,21 @@ class DiffusionDataset:
             if getattr(self.app.cytoplasm, "stop_requested", False): break
 
             packet = self.packets[idx]
-
-            # 1. Ingest via Ribosome -> Membrane
-            # Returns (v, a, t, c, meta)
             try:
+                # Membrane returns (v, a, t, c, meta)
                 data = self.app.ribosome.ingest_packet(packet)
             except:
-                continue  # Skip bad files
+                continue
 
             v, a, t, c, _ = data
-
-            # Skip empty text/data
             if t is None or t.size(1) < 1: continue
 
-            # 2. Calculate Mask Ratio (Curriculum)
-            # This logic moves here so the dataset yields the "instruction" for the model
             mask_ratio = None
             if self.settings["use_uniform"]:
                 low = self.settings["uniform_min"]
                 high = self.settings["uniform_max"]
                 mask_ratio = random.uniform(low, high)
 
-            # Yield batch for Cytoplasm
-            # Format: (v, a, t, c, mask_ratio)
             yield (v, a, t, c, mask_ratio)
 
 
@@ -91,21 +82,16 @@ class Plugin:
         self.training_queue = []
         self.all_scanned_packets = []
 
-        # State
         self.update_queue = queue.Queue()
         self.processed_count = 0
         self.total_items = 0
 
-        # Filters
         self.train_ext_vars = {}
         self.train_type_vars = {}
-
-        # History
-        self.recent_folders = ["D:/Training_Data"]  # Default
+        self.recent_folders = ["D:/Training_Data"]
 
         # --- UI VARIABLES ---
         if self.parent is None:
-            # Headless
             self.folder_path = MockVar(self.app.paths["data"])
             self.use_uniform = MockVar(True)
             self.uniform_ratio_min = MockVar(0.15)
@@ -122,7 +108,6 @@ class Plugin:
             self.target_epochs = MockVar(1)
             self.narrative_mode = MockVar(True)
         else:
-            # GUI
             self.folder_path = tk.StringVar(value=self.app.paths["data"])
             self.use_uniform = tk.BooleanVar(value=True)
             self.uniform_ratio_min = tk.DoubleVar(value=0.15)
@@ -146,7 +131,10 @@ class Plugin:
     def _setup_ui(self):
         if self.parent is None: return
 
-        # Layout logic mostly identical to before, but wired to new variables
+        # === SCALING FIX ===
+        scale = getattr(self.app, 'ui_scale', 1.0)
+        log_font = ("Consolas", int(10 * scale))
+
         split = ttk.PanedWindow(self.parent, orient="horizontal")
         split.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -166,11 +154,10 @@ class Plugin:
         ttk.Button(r1, text="📂", width=3, command=self._browse).pack(side="left", padx=2)
         ttk.Button(r1, text="SCAN", command=self._scan).pack(side="left", padx=2)
 
-        # 2. Masking Curriculum
+        # 2. Masking
         fr_mask = ttk.LabelFrame(left, text="Masking Strategy", padding=10)
         fr_mask.pack(fill="x", pady=5)
 
-        # Uniform
         r_uni = ttk.Frame(fr_mask)
         r_uni.pack(fill="x")
         ttk.Checkbutton(r_uni, text="Uniform Random", variable=self.use_uniform).pack(side="left")
@@ -179,7 +166,6 @@ class Plugin:
         ttk.Label(r_uni, text="-").pack(side="left")
         ttk.Entry(r_uni, textvariable=self.uniform_ratio_max, width=5).pack(side="left", padx=2)
 
-        # Cross-Modal
         r_cross = ttk.Frame(fr_mask)
         r_cross.pack(fill="x", pady=5)
         ttk.Checkbutton(r_cross, text="Cross-Modal Drop", variable=self.use_cross_modal).pack(side="left")
@@ -206,18 +192,18 @@ class Plugin:
         ttk.Checkbutton(r_set, text="Narrative Mode (No Shuffle)", variable=self.narrative_mode).pack(side="left",
                                                                                                       padx=10)
 
-        # 4. Logs
+        # 4. Logs (Applied Font Here)
         fr_log = ttk.LabelFrame(left, text="Director Logs", padding=10)
         fr_log.pack(fill="both", expand=True, pady=5)
 
-        self.log_box = tk.Text(fr_log, font=("Consolas", 9), height=10, bg=self.app.colors["BG_MAIN"],
+        self.log_box = tk.Text(fr_log, font=log_font, height=10, bg=self.app.colors["BG_MAIN"],
                                fg=self.app.colors["FG_TEXT"])
         self.log_box.pack(side="left", fill="both", expand=True)
         sb = ttk.Scrollbar(fr_log, command=self.log_box.yview)
         sb.pack(side="right", fill="y")
         self.log_box.config(yscrollcommand=sb.set)
 
-        # 5. Census (Right)
+        # 5. Census
         fr_census = ttk.LabelFrame(right, text="Census (Filters)", padding=10)
         fr_census.pack(fill="both", expand=True)
 
@@ -255,7 +241,6 @@ class Plugin:
         if self.parent: self.parent.after(100, self._process_gui_queue)
 
     def _toggle_pause(self):
-        # Direct access to Cytoplasm state
         self.app.cytoplasm.pause()
         paused = self.app.cytoplasm.is_paused
         self.btn_pause.config(text="RESUME" if paused else "PAUSE")
@@ -272,7 +257,6 @@ class Plugin:
         self.train_type_vars = {}
         self.train_ext_vars = {}
 
-        # Extension Map
         ext_map = {
             'v': {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp'},
             'a': {'.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac'},
@@ -281,22 +265,17 @@ class Plugin:
             'vid': {'.mp4', '.mkv', '.avi', '.mov'}
         }
         all_valid_exts = set().union(*ext_map.values())
-
         file_sets = {}
         ext_counts = {}
 
-        # 1. Walk Files
         for root, _, fs in os.walk(folder):
             for f in fs:
                 base, ext = os.path.splitext(f)
                 lext = ext.lower()
-
                 if lext in all_valid_exts:
                     key = os.path.join(root, base).lower()
                     if key not in file_sets: file_sets[key] = {}
-
                     full_path = os.path.join(root, f)
-
                     if lext in ext_map['v']:
                         file_sets[key]['v'] = full_path
                     elif lext in ext_map['a']:
@@ -308,14 +287,11 @@ class Plugin:
                     elif lext in ext_map['vid']:
                         file_sets[key]['vid'] = full_path
 
-        # 2. Classify Packets
         q, tr, p, s = 0, 0, 0, 0
         sorted_keys = sorted(file_sets.keys())
 
         for key in sorted_keys:
             packet = file_sets[key].copy()
-
-            # Empty check
             if 't' in packet:
                 try:
                     if os.path.getsize(packet['t']) < 10: del packet['t']
@@ -328,29 +304,21 @@ class Plugin:
             has_c = 'c' in packet
             has_vid = 'vid' in packet
 
-            # Quad
             if has_v and has_a and has_t and has_c:
                 packet['type'] = 'quad'
                 self.all_scanned_packets.append(packet)
                 q += 1
                 continue
-
-            # Triplet
             if (has_vid and has_t) or (has_v and has_a and has_t):
                 packet['type'] = 'triplet'
                 self.all_scanned_packets.append(packet)
                 tr += 1
                 continue
-
-            # Pair
             if (has_v and has_t) or (has_a and has_t) or (has_v and has_a):
                 packet['type'] = 'pair'
                 self.all_scanned_packets.append(packet)
                 p += 1
                 continue
-
-            # Single
-            # Video Single
             if has_vid:
                 path = packet['vid']
                 _, e = os.path.splitext(path)
@@ -359,8 +327,6 @@ class Plugin:
                 ext_counts[lext] = ext_counts.get(lext, 0) + 1
                 s += 1
                 continue
-
-            # Other Singles
             for k, path in file_sets[key].items():
                 _, e = os.path.splitext(path)
                 lext = e.lower()
@@ -370,10 +336,8 @@ class Plugin:
 
         self._log(f"Scan: {s} Single, {p} Pair, {tr} Trip, {q} Quad.", )
 
-        # 3. Update Census UI
         if self.parent:
             for w in self.scroll_fr.winfo_children(): w.destroy()
-
             row = 0
 
             def add_chk(text, var_key, container=self.train_type_vars):
@@ -384,36 +348,28 @@ class Plugin:
             if q > 0: add_chk(f"Quadruplets ({q})", 'quad'); row += 1
             if tr > 0: add_chk(f"Triplets ({tr})", 'triplet'); row += 1
             if p > 0: add_chk(f"Pairs ({p})", 'pair'); row += 1
-
             if row > 0:
                 ttk.Separator(self.scroll_fr, orient='horizontal').grid(row=row, column=0, sticky="ew", pady=5)
                 row += 1
-
             for ext in sorted(ext_counts.keys()):
                 add_chk(f"{ext} ({ext_counts[ext]})", ext, self.train_ext_vars)
                 row += 1
-
             self.scroll_fr.update_idletasks()
             self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     # --- TRAINING START ---
     def _start_training(self):
-        # 1. Check Lobe
         active_id = self.app.active_lobe.get()
         handle = self.app.lobe_manager.get_lobe(active_id)
-
         if not handle:
             messagebox.showerror("Error", "No Lobe Loaded.")
             return
-
         if handle.model_type != "diffusion":
             messagebox.showwarning("Mismatch", "Active lobe is not a Diffusion model.")
             return
 
-        # 2. Filter Queue
         self.training_queue = []
 
-        # Helper for checkbox state
         def safe_get(v):
             return v.get() if v else False
 
@@ -438,10 +394,8 @@ class Plugin:
             return
 
         if self.narrative_mode.get():
-            # Sort by filename
             self.training_queue.sort(key=lambda x: x.get('t', x.get('vid', x.get('v', ''))))
 
-        # 3. Stop if running
         if self.is_training:
             self.app.cytoplasm.stop()
             self.btn_start.config(text="STOPPING...")
@@ -451,21 +405,15 @@ class Plugin:
         self.btn_start.config(text="STOP")
         self.btn_pause.config(state="normal")
 
-        # 4. Configure & Launch
         from Organelles.cytoplasm import TrainConfig
-
-        # Prepare settings dict for the dataset iterator
         iter_settings = {
             "narrative": self.narrative_mode.get(),
             "use_uniform": self.use_uniform.get(),
             "uniform_min": self.uniform_ratio_min.get(),
             "uniform_max": self.uniform_ratio_max.get()
         }
-
-        # Create Iterable
         dataset = DiffusionDataset(self.training_queue, self.app, iter_settings)
 
-        # Cytoplasm Config
         conf = TrainConfig(
             epochs=self.target_epochs.get(),
             autosave_interval=self.autosave_interval.get(),
@@ -475,35 +423,30 @@ class Plugin:
             loss_clamp_game=(self.nurse_game[0].get(), self.nurse_game[1].get()) if self.nurse_game[2].get() else None
         )
 
-        # Register Callbacks
+        self.app.cytoplasm.clear_callbacks()
         self.app.cytoplasm.register_callback("step", self._on_step)
         self.app.cytoplasm.register_callback("epoch", lambda e: self._log(f"Epoch {e} started"))
         self.app.cytoplasm.register_callback("autosave", self._on_autosave)
         self.app.cytoplasm.register_callback("finished", self._on_finished)
         self.app.cytoplasm.register_callback("error", lambda e: self._log(f"Error: {e}"))
 
-        # Thread
         threading.Thread(target=self.app.cytoplasm.train,
                          args=(conf, handle, dataset, "diffusion"),
                          daemon=True).start()
 
-    # --- CALLBACKS ---
     def _on_step(self, step, loss_dict):
         if step % 10 == 0:
             recon = loss_dict.get("recon", 0)
             game = loss_dict.get("game", 0)
             self._log(f"Step {step} | Recon: {recon:.4f} | Game: {game:.4f}")
-
-            # Populate Shared Graph Data
-            ep = 1  # Simplified epoch logic
+            ep = 1
             if ep not in self.app.graph_data:
                 self.app.graph_data[ep] = {'total': [], 'text': [], 'vis': [], 'raw_total': [], 'raw_text': [],
                                            'raw_vis': []}
-
             self.app.graph_data[ep]['total'].append(loss_dict['total'])
             self.app.graph_data[ep]['raw_total'].append(loss_dict['total'])
-            self.app.graph_data[ep]['raw_text'].append(recon)  # Red line (Recon)
-            self.app.graph_data[ep]['raw_vis'].append(game)  # Blue line (Game)
+            self.app.graph_data[ep]['raw_text'].append(recon)
+            self.app.graph_data[ep]['raw_vis'].append(game)
 
     def _on_autosave(self, step):
         active_id = self.app.active_lobe.get()
