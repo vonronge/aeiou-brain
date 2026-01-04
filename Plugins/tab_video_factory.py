@@ -26,6 +26,7 @@ import torch
 import torchaudio
 from PIL import Image
 import subprocess
+import json  # Added for Motion Data storage
 
 # --- ROBUST IMPORTS ---
 try:
@@ -73,7 +74,7 @@ class Plugin:
         self._setup_ui()
 
     def _setup_ui(self):
-        top = ttk.LabelFrame(self.parent, text="Video Timeline Production (v3 - Embedded Subs)", padding=15)
+        top = ttk.LabelFrame(self.parent, text="Video Timeline Production (v4 - Physics Aware)", padding=15)
         top.pack(fill="x", padx=20, pady=10)
 
         row1 = ttk.Frame(top)
@@ -117,6 +118,7 @@ class Plugin:
         self.log_box.tag_config("success", foreground=self.app.colors["SUCCESS"])
         self.log_box.tag_config("error", foreground=self.app.colors["ERROR"])
         self.log_box.tag_config("warn", foreground=self.app.colors["WARN"])
+        self.log_box.tag_config("motion", foreground="#FDD663")  # Yellow for physics data
 
     def _browse(self):
         d = filedialog.askdirectory()
@@ -206,9 +208,7 @@ class Plugin:
                 # B. Try Embedded (FFMPEG Rip)
                 if not subs:
                     try:
-                        # -map 0:s:0 selects the first subtitle stream
                         cmd = [FFMPEG_EXE, '-i', video_path, '-map', '0:s:0', temp_srt, '-y']
-                        # Run quietly
                         subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
 
                         if os.path.exists(temp_srt) and os.path.getsize(temp_srt) > 0:
@@ -228,6 +228,7 @@ class Plugin:
                     waveform, sr = torchaudio.load(temp_wav)
                 except Exception as ae:
                     self.parent.after(0, lambda m=str(ae): self._log(f" > Audio Extract Failed: {m}", "error"))
+                    # Fallback silent audio
                     cap_check = cv2.VideoCapture(video_path)
                     fps_check = cap_check.get(cv2.CAP_PROP_FPS)
                     frames_check = int(cap_check.get(cv2.CAP_PROP_FRAME_COUNT))
@@ -235,7 +236,7 @@ class Plugin:
                     waveform = torch.zeros(1, int(frames_check / fps_check * 24000) if fps_check > 0 else 24000)
                     sr = 24000
 
-                # --- 4. SLICING LOOP ---
+                # --- 4. SLICING LOOP (MOTION ENHANCED) ---
                 cap = cv2.VideoCapture(video_path)
                 fps = cap.get(cv2.CAP_PROP_FPS)
                 if fps <= 0: fps = 24.0
@@ -247,22 +248,62 @@ class Plugin:
                 frame_cursor = 0
                 slice_count = 0
 
+                # Motion State
+                prev_gray = None
+
                 while cap.isOpened():
                     if self.factory_stop: break
                     ret, frame = cap.read()
                     if not ret: break
+
+                    # Convert to grayscale for flow
+                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
                     if frame_cursor % frame_interval == 0:
                         timestamp_sec = frame_cursor / fps
                         slice_id = slice_count + 1
                         out_base = os.path.join(output_dir, f"{base_name}_p{slice_id:05d}")
 
-                        # IMAGE
+                        # Skip existing check
+                        if self.skip_existing.get() and os.path.exists(f"{out_base}.json"):
+                            # Still need to update motion tracking state
+                            prev_gray = gray
+                            frame_cursor += 1
+                            continue
+
+                        # 1. IMAGE
                         frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
                         img = Image.fromarray(frame_rgb).resize((256, 256))
                         img.save(f"{out_base}.png")
 
-                        # AUDIO SLICE
+                        # 2. OPTICAL FLOW (Control Channel)
+                        flow_vector = [0.0, 0.0]
+                        if prev_gray is not None:
+                            # Dense Optical Flow (Farneback)
+                            # Params: prev, next, flow, pyr_scale, levels, winsize, iterations, poly_n, poly_sigma, flags
+                            flow = cv2.calcOpticalFlowFarneback(
+                                prev_gray, gray, None,
+                                0.5, 3, 15, 3, 5, 1.2, 0
+                            )
+                            # Average flow across the entire frame
+                            avg_flow = np.mean(flow, axis=(0, 1))
+
+                            # Normalize heuristic (approximate velocity scaling)
+                            flow_vector = [float(avg_flow[0])/10.0, float(avg_flow[1])/10.0]
+
+                        # Save Control/Physics Data
+                        control_data = {
+                            "control_vec": flow_vector,
+                            "meta": {
+                                "fps": fps,
+                                "ts": timestamp_sec,
+                                "source": name
+                            }
+                        }
+                        with open(f"{out_base}.json", 'w', encoding='utf-8') as f:
+                            json.dump(control_data, f)
+
+                        # 3. AUDIO SLICE
                         center_sample = int(timestamp_sec * sr)
                         half_window = int((audio_window / 2) * sr)
                         start_s = max(0, center_sample - half_window)
@@ -276,41 +317,35 @@ class Plugin:
 
                         torchaudio.save(f"{out_base}.wav", clip, sr)
 
-                        # TEXT SYNC (Robust PySRT check)
+                        # 4. TEXT SYNC
                         txt_out = ""
                         if subs:
-                            # pysrt uses ordinal (ms) objects
-                            # We check if current timestamp is within any sub's duration
                             current_ms = timestamp_sec * 1000
-                            # Simple linear search (for short videos this is fine, for movies binary search is better but complex)
-                            # Optimizing: search only recent subs
                             matches = []
                             for sub in subs:
                                 if sub.start.ordinal <= current_ms <= sub.end.ordinal:
                                     matches.append(sub.text)
                                 elif sub.start.ordinal > current_ms:
-                                    break  # Sorted assumption
-
+                                    break
                             if matches:
                                 txt_out = " ".join(matches).replace('\n', ' ')
 
                         with open(f"{out_base}.txt", 'w', encoding='utf-8') as f:
                             f.write(txt_out)
 
-                        # CONTROL
-                        with open(f"{out_base}.json", 'w', encoding='utf-8') as f:
-                            f.write("{}")
-
                         slice_count += 1
                         if slice_count % 10 == 0:
-                            self.parent.after(0, lambda n=slice_count, t=timestamp_sec:
-                            self._log(f" > Slice {n} @ {t:.1f}s"))
+                            v_str = f"[{flow_vector[0]:.2f}, {flow_vector[1]:.2f}]"
+                            self.parent.after(0, lambda n=slice_count, t=timestamp_sec, v=v_str:
+                            self._log(f" > Slice {n} @ {t:.1f}s | Flow: {v}", "motion"))
 
+                    # Update Motion State
+                    prev_gray = gray
                     frame_cursor += 1
 
                 cap.release()
 
-                # Cleanup
+                # Cleanup temps
                 for tmp in [temp_wav, temp_srt]:
                     if os.path.exists(tmp):
                         try:
