@@ -33,15 +33,19 @@ import traceback
 
 try:
     import fitz  # PyMuPDF
+
     HAS_FITZ = True
 except ImportError:
     HAS_FITZ = False
     print(" ! Diffusion Trainer: Install 'pymupdf' for PDF support.")
 
+
 # --- HEADLESS HELPER ---
 class MockVar:
     def __init__(self, value=None): self._val = value
+
     def set(self, value): self._val = value
+
     def get(self): return self._val
 
 
@@ -68,10 +72,10 @@ class Plugin:
         self.history_file = os.path.join(self.app.paths["root"], "diffusion_history.json")
         self.recent_folders = self._load_json(self.history_file, [])
         default_folder = self.recent_folders[0] if self.recent_folders else "D:/Training_Data"
-        
+
         # Telepathy/Config override
         if hasattr(self.app.paths, "data") and os.path.exists(self.app.paths["data"]):
-             default_folder = self.app.paths["data"]
+            default_folder = self.app.paths["data"]
 
         self.processed_count = 0
         self.total_items = 0
@@ -147,8 +151,10 @@ class Plugin:
 
         row_btns = ttk.Frame(fr_src)
         row_btns.pack(fill="x", pady=5)
-        ttk.Button(row_btns, text="SCAN FOLDER", command=self._scan_files).pack(side="left", fill="x", expand=True, padx=2)
-        ttk.Button(row_btns, text="CLEAR QUEUE", command=self._clear_queue).pack(side="left", fill="x", expand=True, padx=2)
+        ttk.Button(row_btns, text="SCAN FOLDER", command=self._scan_files).pack(side="left", fill="x", expand=True,
+                                                                                padx=2)
+        ttk.Button(row_btns, text="CLEAR QUEUE", command=self._clear_queue).pack(side="left", fill="x", expand=True,
+                                                                                 padx=2)
 
         # 2. MASKING
         fr_mask = ttk.LabelFrame(left, text="Masking Curriculum", padding=10)
@@ -266,20 +272,22 @@ class Plugin:
             # GUI logging with LAG PREVENTION
             def _update():
                 if not hasattr(self, 'log_box'): return
-                
+
                 # --- OPTIMIZATION: PRUNE LOGS ---
                 try:
                     num_lines = int(self.log_box.index('end-1c').split('.')[0])
                     if num_lines > 1000:
                         self.log_box.delete("1.0", "100.0")
-                except: pass
+                except:
+                    pass
 
                 self.log_box.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n", tag)
                 if self.auto_scroll.get(): self.log_box.see(tk.END)
-            
+
             try:
                 self.parent.after(0, _update)
-            except: pass
+            except:
+                pass
 
     def _toggle_pause(self):
         self.is_paused = not self.is_paused
@@ -299,7 +307,7 @@ class Plugin:
 
         if self.parent:
             for w in self.scroll_fr.winfo_children(): w.destroy()
-        
+
         self._log_threadsafe("Queue Cleared.", "warn")
 
     def _scan_files(self):
@@ -346,7 +354,7 @@ class Plugin:
 
         for key in sorted_keys:
             packet = file_sets[key].copy()
-            
+
             # --- FIXED: EMPTY FILE DETECTION ---
             if 't' in packet:
                 try:
@@ -363,7 +371,7 @@ class Plugin:
                 packet['type'] = 'triplet'
                 self.all_scanned_packets.append(packet)
                 tr += 1
-                continue 
+                continue
 
             if has_v and has_a and has_t and has_c:
                 packet['type'] = 'quad'
@@ -398,6 +406,7 @@ class Plugin:
         # GUI Update Logic
         if self.parent:
             row = 0
+
             def add_chk(text, var_key, container=self.train_type_vars):
                 var = tk.BooleanVar(value=True)
                 container[var_key] = var
@@ -445,7 +454,8 @@ class Plugin:
         lobe_type = self.app.lobe_types.get(active_id)
         if lobe_type != "diffusion":
             if self.parent:
-                messagebox.showwarning("Mismatch", "Diffusion Trainer requires a Diffusion lobe.\nThis appears to be a standard Transformer.")
+                messagebox.showwarning("Mismatch",
+                                       "Diffusion Trainer requires a Diffusion lobe.\nThis appears to be a standard Transformer.")
             else:
                 print("Error: Model type mismatch. Requires diffusion.")
             return
@@ -458,6 +468,7 @@ class Plugin:
             return
 
         self.training_queue = []
+
         # Handle MockVar vs BooleanVar
         # Helper to safely get value
         def safe_get_bool(v):
@@ -493,7 +504,7 @@ class Plugin:
         self.total_items = len(self.training_queue) * self.target_epochs.get()
         self.is_training = True
         self.stop_requested = False
-        
+
         if self.parent:
             self.btn_start.config(text="STOP")
             self.btn_pause.config(state="normal")
@@ -694,8 +705,8 @@ class Plugin:
                     path = os.path.join(self.app.paths['lobes'], f"brain_lobe_{active_id}.pt")
                     try:
                         torch.save({
-                            "genome": self.app.lobe_genomes.get(active_id, "Unknown"), 
-                            "model_type": "diffusion", # Explicitly save type
+                            "genome": self.app.lobe_genomes.get(active_id, "Unknown"),
+                            "model_type": "diffusion",  # Explicitly save type
                             "state_dict": brain.state_dict()
                         }, path)
                         self._log_threadsafe(f"AUTO-SAVE at {self.processed_count}", "save")

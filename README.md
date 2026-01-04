@@ -78,7 +78,7 @@ AEIOU is an experimental playground—adding new "genetics" (architectures) is e
    - `NucleusConfig` class (hyperparams)
    - `Model` class inheriting from `MultimodalBase`
 
-   Basic template:
+   Minimal template:
    ```python
    INFO = {
        "name": "My Custom Arch",
@@ -105,12 +105,32 @@ AEIOU is an experimental playground—adding new "genetics" (architectures) is e
            x = self.embed_inputs(v, a, t, c)
            # Custom processing
            return self.head(x), None, None
-
+   ```
 
 3. Restart GUI—new option appears in Cortex Control.
 
-**Tip**: Use Grok, Gemini, Claude, etc. to brainstorm code. Prompt example:
-"I'm adding a new transformer variant to a local multimodal project. Inherit from MultimodalBase. Implement [idea] with embed_dim=768, 12 layers. Output INFO, NucleusConfig, and Model class."
+**Pro Tip: Use an AI to Generate Code**  
+Paste this into Grok, Gemini, Claude, or any strong LLM to brainstorm a full genetics file:
+
+```
+I'm adding a new model architecture to AEIOU Brain, a local multimodal PyTorch project.
+The base class is MultimodalBase (handles V→A→C→T fusion with projections and RoPE).
+
+Implement [your idea here, e.g. "a hybrid of Llama RoPE/SwiGLU with discrete diffusion masking for better long-context reasoning"].
+
+Constraints:
+- embed_dim = 768
+- 12 layers, 12 heads
+- Inherit from MultimodalBase
+- Use existing utils (RMSNorm, RotaryEmbedding, apply_rope, etc.)
+
+Output:
+1. INFO dict
+2. NucleusConfig class
+3. Full Model class with __init__ and forward()
+
+
+Iterate by pasting back output and asking for fixes.
 
 PRs with new genetics welcome!
 
@@ -127,6 +147,7 @@ python genesis.py          # Setup folders
 python GUI.py              # Launch GUI
 # Headless training:
 python telepathy.py --headless --mode=train --lobe=1 --data="./Training_Data/MyFolder"
+
 
 MIT Licensed — experiment freely, share improvements.
 

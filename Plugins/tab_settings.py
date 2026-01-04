@@ -17,6 +17,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, colorchooser
 import json
 import os
+import sys  # <--- Added missing import
 
 
 class Plugin:
@@ -157,8 +158,6 @@ class Plugin:
             data["ui_scale"] = round(self.scale_var.get(), 2)
 
             # 2. Update Paths
-            # Note: We save them exactly as entered.
-            # GUI.py handles relative vs absolute logic on load.
             data["data_dir"] = self.path_vars["data_dir"].get()
             data["chaos_dir"] = self.path_vars["chaos_dir"].get()
             data["output_dir"] = self.path_vars["output_dir"].get()
@@ -176,7 +175,6 @@ class Plugin:
             if messagebox.askyesno("Saved",
                                    "Settings saved successfully.\n\nRestart Application now to apply changes?"):
                 self.app.destroy()
-                # Optional: self-restart logic could go here, but usually safer to just close
 
         except Exception as e:
             messagebox.showerror("Error", f"Could not save settings: {e}")
