@@ -30,23 +30,20 @@ import json
 from collections import deque
 import math
 import numpy as np
+import traceback
 
 # --- SAFE IMPORTS ---
 try:
     import fitz  # PyMuPDF
-
     HAS_FITZ = True
 except ImportError:
     HAS_FITZ = False
     print(" ! Transformer Trainer: Install 'pymupdf' for PDF support.")
 
-
 # --- HEADLESS HELPER ---
 class MockVar:
     def __init__(self, value=None): self._val = value
-
     def set(self, value): self._val = value
-
     def get(self): return self._val
 
 
@@ -63,14 +60,17 @@ class Plugin:
         self.train_ext_vars = {}
         self.train_type_vars = {}
         self.data_queue = queue.Queue(maxsize=5)
-
+        
         self.state_file = os.path.join(self.app.paths["root"], "trainer_state.json")
         self.history_file = os.path.join(self.app.paths["root"], "trainer_history.json")
         self.recent_folders = self._load_json(self.history_file, [])
-        default_folder = self.recent_folders[0] if self.recent_folders else "D:/Training_Data"
-        # Telepathy/Config override
+        
+        # Dynamic Default Path
+        default_folder = "D:/Training_Data"
         if hasattr(self.app.paths, "data") and os.path.exists(self.app.paths["data"]):
-            default_folder = self.app.paths["data"]
+             default_folder = self.app.paths["data"]
+        elif self.recent_folders:
+            default_folder = self.recent_folders[0]
 
         # --- INITIALIZE VARIABLES (GUI vs HEADLESS) ---
         if self.parent is None:
@@ -148,12 +148,9 @@ class Plugin:
 
         row_btns_src = ttk.Frame(fr_src, padding=(0, 5, 0, 0))
         row_btns_src.pack(fill="x")
-        ttk.Button(row_btns_src, text="SCAN FOLDER", command=self._scan_files).pack(side="left", padx=2, fill="x",
-                                                                                    expand=True)
-        ttk.Button(row_btns_src, text="CLEAR QUEUE", command=self._clear_queue).pack(side="left", padx=2, fill="x",
-                                                                                     expand=True)
-        ttk.Button(row_btns_src, text="RESET SESSION", command=self._reset_session).pack(side="left", padx=2, fill="x",
-                                                                                         expand=True)
+        ttk.Button(row_btns_src, text="SCAN FOLDER", command=self._scan_files).pack(side="left", padx=2, fill="x", expand=True)
+        ttk.Button(row_btns_src, text="CLEAR QUEUE", command=self._clear_queue).pack(side="left", padx=2, fill="x", expand=True)
+        ttk.Button(row_btns_src, text="RESET SESSION", command=self._reset_session).pack(side="left", padx=2, fill="x", expand=True)
 
         # --- CONTROLS ---
         fr_ctrl = ttk.LabelFrame(left, text="Training Operations", padding=10)
@@ -170,12 +167,10 @@ class Plugin:
         row_sets.pack(fill="x", pady=2)
         ttk.Label(row_sets, text="Epochs:").pack(side="left")
         ttk.Spinbox(row_sets, from_=1, to=999, textvariable=self.target_epochs, width=4).pack(side="left")
-        ttk.Label(row_sets, text="Workers:").pack(side="left", padx=(10, 0))
-        ttk.Scale(row_sets, from_=1, to=16, variable=self.num_workers, orient="horizontal", length=80).pack(side="left",
-                                                                                                            padx=5)
+        ttk.Label(row_sets, text="Workers:").pack(side="left", padx=(10,0))
+        ttk.Scale(row_sets, from_=1, to=16, variable=self.num_workers, orient="horizontal", length=80).pack(side="left", padx=5)
         ttk.Checkbutton(row_sets, text="Narrative Mode", variable=self.narrative_mode).pack(side="left", padx=15)
-        ttk.Label(row_sets, textvariable=self.current_epoch_var, foreground=self.app.colors["ACCENT"]).pack(
-            side="right", padx=10)
+        ttk.Label(row_sets, textvariable=self.current_epoch_var, foreground=self.app.colors["ACCENT"]).pack(side="right", padx=10)
 
         # --- NURSERY ---
         fr_nurse = ttk.LabelFrame(fr_ctrl, text="Nursery (Safety Corridor)", padding=5)
@@ -244,20 +239,16 @@ class Plugin:
 
     def _load_json(self, path, default):
         if os.path.exists(path):
-            try:
-                return json.load(open(path, 'r'))
-            except:
-                pass
+            try: return json.load(open(path, 'r'))
+            except: pass
         return default
 
     def _save_history(self):
         curr = self.folder_path.get()
         if curr in self.recent_folders: self.recent_folders.remove(curr)
         self.recent_folders.insert(0, curr)
-        try:
-            json.dump(self.recent_folders[:10], open(self.history_file, 'w'))
-        except:
-            pass
+        try: json.dump(self.recent_folders[:10], open(self.history_file, 'w'))
+        except: pass
 
     def _save_session_state(self):
         state = {
@@ -269,8 +260,7 @@ class Plugin:
             "target_epochs": self.target_epochs.get()
         }
         try:
-            with open(self.state_file, 'w') as f:
-                json.dump(state, f)
+            with open(self.state_file, 'w') as f: json.dump(state, f)
         except Exception as e:
             print(f"State Save Error: {e}")
 
@@ -278,7 +268,7 @@ class Plugin:
         if not os.path.exists(self.state_file): return
         try:
             state = json.load(open(self.state_file, 'r'))
-            self.folder_path.set(state.get("folder", "D:/Training_Data"))
+            self.folder_path.set(state.get("folder", self.folder_path.get()))
             self.target_epochs.set(state.get("target_epochs", 1))
             self.processed_count = state.get("processed_count", 0)
             self.total_items = state.get("total_items", 0)
@@ -310,14 +300,12 @@ class Plugin:
         self.train_ext_vars = {}
         self.train_type_vars = {}
         while not self.data_queue.empty():
-            try:
-                self.data_queue.get_nowait()
-            except:
-                break
-
+            try: self.data_queue.get_nowait()
+            except: break
+        
         if self.parent:
             for w in self.scroll_fr.winfo_children(): w.destroy()
-
+        
         self._log("Queue and Buffer Cleared.", "warn")
 
     def on_theme_change(self):
@@ -334,12 +322,23 @@ class Plugin:
             # Headless logging
             print(f"[{tag.upper()}] {msg}")
         else:
-            # GUI logging
+            # GUI logging with LAG PREVENTION
             def _update():
+                if not hasattr(self, 'log_box'): return
+
+                # --- OPTIMIZATION: PRUNE LOGS ---
+                try:
+                    num_lines = int(self.log_box.index('end-1c').split('.')[0])
+                    if num_lines > 1000:
+                        self.log_box.delete("1.0", "100.0")
+                except: pass
+
                 self.log_box.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n", tag)
                 if self.auto_scroll.get(): self.log_box.see(tk.END)
-
-            self.parent.after(0, _update)
+                
+            try:
+                self.parent.after(0, _update)
+            except: pass
 
     def _toggle_pause(self):
         self.is_paused = not self.is_paused
@@ -349,7 +348,7 @@ class Plugin:
     def _scan_files(self):
         folder = self.folder_path.get()
         if not os.path.exists(folder): self._log("Folder not found.", "error"); return
-
+        
         self._clear_queue()
         self._log(f"Scanning {folder}...", "info")
 
@@ -358,8 +357,7 @@ class Plugin:
             'v': {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp'},
             'a': {'.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac'},
             'c': {'.json', '.csv', '.ctl'},
-            't': {'.pdf', '.txt', '.md', '.doc', '.docx', '.html', '.xml', '.py', '.js', '.c', '.cpp', '.h', '.srt',
-                  '.vtt', '.ass'},
+            't': {'.pdf', '.txt', '.md', '.doc', '.docx', '.html', '.xml', '.py', '.js', '.c', '.cpp', '.h', '.srt', '.vtt', '.ass'},
             'vid': {'.mp4', '.mkv', '.avi', '.mov'}
         }
         all_valid_exts = set().union(*ext_map.values())
@@ -373,24 +371,19 @@ class Plugin:
                 if lext in all_valid_exts:
                     key = os.path.join(root, base)
                     if key not in file_sets: file_sets[key] = {}
-
-                    if lext in ext_map['v']:
-                        file_sets[key]['v'] = os.path.join(root, f)
-                    elif lext in ext_map['a']:
-                        file_sets[key]['a'] = os.path.join(root, f)
-                    elif lext in ext_map['c']:
-                        file_sets[key]['c'] = os.path.join(root, f)
-                    elif lext in ext_map['t']:
-                        file_sets[key]['t'] = os.path.join(root, f)
-                    elif lext in ext_map['vid']:
-                        file_sets[key]['vid'] = os.path.join(root, f)
+                    
+                    if lext in ext_map['v']: file_sets[key]['v'] = os.path.join(root, f)
+                    elif lext in ext_map['a']: file_sets[key]['a'] = os.path.join(root, f)
+                    elif lext in ext_map['c']: file_sets[key]['c'] = os.path.join(root, f)
+                    elif lext in ext_map['t']: file_sets[key]['t'] = os.path.join(root, f)
+                    elif lext in ext_map['vid']: file_sets[key]['vid'] = os.path.join(root, f)
 
         q, tr, p, s = 0, 0, 0, 0
         sorted_keys = sorted(file_sets.keys())
-
+        
         for key in sorted_keys:
             packet = file_sets[key].copy()
-
+            
             # --- EMPTY TEXT CHECK ---
             if 't' in packet:
                 try:
@@ -405,21 +398,18 @@ class Plugin:
             if (has_vid and has_t) or (has_v and has_a and has_t):
                 packet['type'] = 'triplet'
                 self.all_scanned_packets.append(packet)
-                tr += 1;
-                continue
-
+                tr += 1; continue
+            
             if has_v and has_a and has_t and has_c:
                 packet['type'] = 'quad'
                 self.all_scanned_packets.append(packet)
-                q += 1;
-                continue
-
+                q += 1; continue
+            
             if (has_v and has_t) or (has_a and has_t) or (has_v and has_a):
                 packet['type'] = 'pair'
                 self.all_scanned_packets.append(packet)
-                p += 1;
-                continue
-
+                p += 1; continue
+            
             # Singles logic
             if has_vid:
                 if 'vid' in packet:
@@ -440,20 +430,16 @@ class Plugin:
         # GUI Update Logic
         if self.parent:
             row = 0
-
             def add_chk(text, var_key, container=self.train_type_vars):
-                var = tk.BooleanVar(value=True);
-                container[var_key] = var
+                var = tk.BooleanVar(value=True); container[var_key] = var
                 ttk.Checkbutton(self.scroll_fr, text=text, variable=var).grid(row=row, column=0, sticky="w")
 
             if q > 0: add_chk(f"Quadruplets ({q})", 'quad'); row += 1
             if tr > 0: add_chk(f"Triplets ({tr})", 'triplet'); row += 1
             if p > 0: add_chk(f"Pairs ({p})", 'pair'); row += 1
-            if row > 0: ttk.Separator(self.scroll_fr, orient='horizontal').grid(row=row, column=0, sticky="ew",
-                                                                                pady=5); row += 1
+            if row > 0: ttk.Separator(self.scroll_fr, orient='horizontal').grid(row=row, column=0, sticky="ew", pady=5); row += 1
             for ext in sorted(ext_counts.keys()):
-                add_chk(f"{ext} ({ext_counts[ext]})", ext, self.train_ext_vars);
-                row += 1
+                add_chk(f"{ext} ({ext_counts[ext]})", ext, self.train_ext_vars); row += 1
 
             self.scroll_fr.update_idletasks()
             self.canvas.configure(scrollregion=self.canvas.bbox("all"))
@@ -477,20 +463,16 @@ class Plugin:
         lobe_type = self.app.lobe_types.get(active)
         if lobe_type == "diffusion":
             if self.parent:
-                messagebox.showwarning("Mismatch",
-                                       "Transformer Trainer cannot train Diffusion lobes.\nPlease switch to the Diffusion Director plugin.")
+                messagebox.showwarning("Mismatch", "Transformer Trainer cannot train Diffusion lobes.\nPlease switch to the Diffusion Director plugin.")
             else:
                 print("Error: Model type mismatch (Diffusion in AR trainer)")
             return
 
         while not self.data_queue.empty():
-            try:
-                self.data_queue.get_nowait()
-            except:
-                break
+            try: self.data_queue.get_nowait()
+            except: break
 
         self.training_queue = []
-
         # Handle MockVar vs BooleanVar for headless safety
         def get_val(v):
             return v.get() if v else False
@@ -502,14 +484,10 @@ class Plugin:
 
         for p in self.all_scanned_packets:
             pt = p['type']
-            if pt == 'quad' and t_quad:
-                self.training_queue.append(p)
-            elif pt == 'triplet' and t_trip:
-                self.training_queue.append(p)
-            elif pt == 'pair' and t_pair:
-                self.training_queue.append(p)
-            elif pt == 'single' and p.get('ext') in active_exts:
-                self.training_queue.append(p)
+            if pt == 'quad' and t_quad: self.training_queue.append(p)
+            elif pt == 'triplet' and t_trip: self.training_queue.append(p)
+            elif pt == 'pair' and t_pair: self.training_queue.append(p)
+            elif pt == 'single' and p.get('ext') in active_exts: self.training_queue.append(p)
 
         if not self.training_queue: self._log("Queue Empty.", "error"); return
 
@@ -518,9 +496,8 @@ class Plugin:
             self.training_queue.sort(key=lambda x: x.get('t', x.get('vid', x.get('v', x.get('a', '')))))
 
         self.total_items = len(self.training_queue) * self.target_epochs.get()
-        self.is_training = True;
-        self.stop_requested = False
-
+        self.is_training = True; self.stop_requested = False
+        
         if self.parent:
             self.btn_start.config(text="STOP")
             self.btn_pause.config(state="normal")
@@ -566,7 +543,7 @@ class Plugin:
 
                 if self.parent:
                     self.parent.update_idletasks()
-                while self.is_paused: time.sleep(0.1);
+                while self.is_paused: time.sleep(0.1); 
                 if self.parent: self.parent.update()
 
                 input_t = t[:, :-1]
@@ -587,12 +564,10 @@ class Plugin:
                         except:
                             logits, _, _ = brain(v, a, input_t)
 
-                        offset = (v.shape[1] if v is not None else 0) + (a.shape[1] if a is not None else 0) + (
-                            c.shape[1] if c is not None else 0)
+                        offset = (v.shape[1] if v is not None else 0) + (a.shape[1] if a is not None else 0) + (c.shape[1] if c is not None else 0)
                         if logits.shape[1] == input_t.shape[1]: offset = 0
                         logits_text = logits[:, offset: offset + input_t.shape[1], :]
-                        loss_txt = F.cross_entropy(logits_text.reshape(-1, logits_text.size(-1)), labels.reshape(-1),
-                                                   ignore_index=50256)
+                        loss_txt = F.cross_entropy(logits_text.reshape(-1, logits_text.size(-1)), labels.reshape(-1), ignore_index=50256)
 
                         game_penalty = torch.tensor(0.0, device=self.app.device)
                         has_game = False
@@ -629,10 +604,8 @@ class Plugin:
                             low, high, is_active = settings[0].get(), settings[1].get(), settings[2].get()
                             if not is_active: return 1.0, raw
                             if abs(raw) < 1e-9: return 1.0, raw
-                            if raw < low:
-                                return (low / raw), low
-                            elif raw > high:
-                                return (high / raw), high
+                            if raw < low: return (low / raw), low
+                            elif raw > high: return (high / raw), high
                             return 1.0, raw
 
                         s_pred, graph_pred = get_scaler(raw_pred, self.nurse_pred)
@@ -644,7 +617,7 @@ class Plugin:
                     # Backward
                     scaler.scale(loss).backward()
                     scaler.unscale_(opt)
-
+                    
                     # Gradient Check
                     total_norm = torch.nn.utils.clip_grad_norm_(brain.parameters(), 1.0)
                     if math.isnan(total_norm) or math.isinf(total_norm):
@@ -662,8 +635,7 @@ class Plugin:
                 ep = (self.processed_count // len(self.training_queue)) + 1 if len(self.training_queue) > 0 else 1
 
                 if ep not in self.app.graph_data:
-                    self.app.graph_data[ep] = {'total': [], 'text': [], 'vis': [], 'aud': [], 'raw_total': [],
-                                               'raw_text': [], 'raw_vis': [], 'raw_aud': []}
+                    self.app.graph_data[ep] = {'total': [], 'text': [], 'vis': [], 'aud': [], 'raw_total': [], 'raw_text': [], 'raw_vis': [], 'raw_aud': []}
 
                 self.app.graph_data[ep]['total'].append(val)
                 self.app.graph_data[ep]['text'].append(graph_pred)
@@ -678,7 +650,7 @@ class Plugin:
                     try:
                         torch.save({
                             "genome": self.app.lobe_genomes.get(active_id, "Unknown"),
-                            "model_type": self.app.lobe_types.get(active_id, "ar"),  # Save Type
+                            "model_type": self.app.lobe_types.get(active_id, "ar"), # Save Type
                             "state_dict": brain.state_dict()
                         }, save_path)
                         # Only update GUI log if parent exists, else print
@@ -687,8 +659,7 @@ class Plugin:
                             self.parent.after(0, lambda: self._log(msg, "save"))
                         else:
                             print(msg)
-                    except:
-                        pass
+                    except: pass
 
                 if self.processed_count % 10 == 0:
                     pct = int((self.processed_count / self.total_items) * 100) if self.total_items > 0 else 0
@@ -711,8 +682,7 @@ class Plugin:
                 self.parent.after(0, lambda m=f"CRASH: {e}": self._log(m, "error"))
             else:
                 print(f"CRASH: {e}")
-            import traceback;
-            traceback.print_exc()
+            import traceback; traceback.print_exc()
         finally:
             self.is_training = False
             if self.parent:
