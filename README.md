@@ -69,6 +69,35 @@ Built solo in 2025–2026 on a single RTX 3080 Ti.
 - **Dream State**: Free-run consolidation/hallucination on chaos buffer
 - **Playground**: Chat/generate with active lobe
 
+### Spotlight: MaskedDiffusion-mHC Genetics
+
+This architecture ("MaskedDiffusion-mHC") is one of the more advanced built-in options and showcases several experimental techniques:
+
+- **Bidirectional discrete diffusion**: Unlike autoregressive models that generate left-to-right, this uses masked diffusion on discrete tokens, allowing parallel refinement across the entire sequence. Ideal for "dreaming" (free generation) and iterative improvement.
+
+- **Modality-aware masking curriculum**:
+  - Uniform random masking (early training)
+  - Cross-modal masking (randomly drop entire modalities)
+  - Fine-grained per-modality rates (high for vision, lower for text)
+  - Enables robust multimodal understanding by forcing the model to reconstruct missing senses.
+
+- **mHC routing (manifold-constrained hyper-connections)**:
+  - Splits embeddings into streams
+  - Learned gating + Sinkhorn-Knopp normalization for efficient residual mixing
+  - Adds dynamic routing without full Mixture-of-Experts overhead
+
+- **Deep Delta learning**: Rank-1 updates via projected residuals, helping stabilize training and improve representation efficiency.
+
+- **Game-theoretic pruning**: StrategicLinear layers where weights "compete" via learned participation (alpha) penalized in loss—emergent sparsity without explicit pruning steps.
+
+- **Confidence-driven generation**: Iterative denoising with greedy unmasking of highest-confidence tokens, plus final forced sampling to avoid blanks.
+
+- **Time-conditioned blocks**: Standard diffusion timestep embedding injected per layer.
+
+These combine to make a strong refiner/hallucinator—great for creative tasks or consolidating chaotic data in Dream State.
+
+*Try initializing a lobe with this genetics in **Cortex Control** to experiment!*
+
 ### Adding New Genetics (Model Architectures)
 AEIOU is an experimental playground—adding new "genetics" (architectures) is easy and encouraged.
 
