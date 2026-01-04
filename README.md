@@ -1,4 +1,3 @@
-```markdown
 # AEIOU Brain 🧠
 
 **Finetune your own multimodal AI on local files — textbooks, ebooks, comics, videos, images, audio — all with an easy GUI.**
@@ -24,50 +23,51 @@ AEIOU is a complete, fully local AI ecosystem for training and experimenting wit
 Built solo in 2025–2026 on a single RTX 3080 Ti.
 
 ### How to Use
-1. **Prepare Data**
-   - Create folders inside `Training_Data` (e.g., `MyBooks`, `Lectures`, `Comics`).
-   - Use matching filenames for multimodal pairs:
-     - `book.pdf` + `book.mp3` → audio + text
-     - `page.png` + `page.txt` → image + text
-     - `video.mp4` + `video.srt` → video + subtitles (auto-sliced)
-   - AEIOU detects quads, triplets, pairs, and singles automatically.
 
-2. **Creating & Loading Lobes (Brains)**
-   - Open the GUI (`python GUI.py`)
-   - Go to **Cortex Control** tab (default on launch)
-   - Select a lobe slot (LOBE 1–4) in the header
-   - **Create a new lobe**:
-     - Choose "Target Genetics" from dropdown (e.g., "MaskedDiffusion-mHC" for diffusion dreaming, "Tetra-Llama" for strong reasoning)
-     - Click **INITIALIZE NEW** → creates fresh weights with selected architecture
-   - **Load an existing lobe**:
-     - Place `.pt` files in the `lobes/` folder (or use LOAD FILE button)
-     - Select lobe slot → click **ACTIVATE LOBE** (or LOAD FILE to browse)
-   - Save with **SAVE AS...** or auto-save during training
-   - Tip: Start with diffusion genetics for creative tasks, AR for reasoning/text.
+#### 1. Prepare Data
+- Create folders inside `Training_Data` (e.g., `MyBooks`, `Lectures`, `Comics`).
+- Use matching filenames for multimodal pairs:
+  - `book.pdf` + `book.mp3` → audio + text
+  - `page.png` + `page.txt` → image + text
+  - `video.mp4` + `video.srt` → video + subtitles (auto-sliced)
+- AEIOU detects quads, triplets, pairs, and singles automatically.
 
-3. **Train/Finetune**
-   - Go to **Transformer Trainer** (AR models) or **Diffusion Director** (diffusion models)
-   - Click "SCAN FOLDER" → select your data folder
-   - Filter by type (quad/triplet/pair/single) or extension in Census panel
-   - Choose active lobe → START TRAINING
-   - Monitor loss/telemetry in **Telemetry** tab
+#### 2. Creating & Loading Lobes (Brains)
+- Open the GUI (`python GUI.py`)
+- Go to **Cortex Control** tab (default on launch)
+- Select a lobe slot (LOBE 1–4) in the header
+- **Create a new lobe**:
+  - Choose "Target Genetics" from dropdown (e.g., "MaskedDiffusion-mHC" for diffusion dreaming, "Tetra-Llama" for strong reasoning)
+  - Click **INITIALIZE NEW** → creates fresh weights with selected architecture
+- **Load an existing lobe**:
+  - Place `.pt` files in the `lobes/` folder (or use LOAD FILE button)
+  - Select lobe slot → click **ACTIVATE LOBE** (or LOAD FILE to browse)
+- Save with **SAVE AS...** or auto-save during training
+- *Tip: Start with diffusion genetics for creative tasks, AR for reasoning/text.*
 
-4. **Create Lectures (Lecture Factory)**
-   - Put PDFs/textbooks in a folder
-   - Open **Lecture Factory**
-   - Scan folder → START PRODUCTION
-   - Outputs structured slices (PNG slides + MP3 narration + TXT) ready for training
+#### 3. Train/Finetune
+- Go to **Transformer Trainer** (AR models) or **Diffusion Director** (diffusion models)
+- Click "SCAN FOLDER" → select your data folder
+- Filter by type (quad/triplet/pair/single) or extension in Census panel
+- Choose active lobe → START TRAINING
+- Monitor loss/telemetry in **Telemetry** tab
 
-5. **Create Video Timelines (Video Timeline Factory)**
-   - Put videos (optional .srt subtitles) in folder
-   - Open **Video Timeline Factory**
-   - Set extract FPS/audio seconds → START PRODUCTION
-   - Outputs timed triplets (PNG frame + WAV clip + TXT subtitle)
+#### 4. Create Lectures (Lecture Factory)
+- Put PDFs/textbooks in a folder
+- Open **Lecture Factory**
+- Scan folder → START PRODUCTION
+- Outputs structured slices (PNG slides + MP3 narration + TXT) ready for training
 
-6. **Generate Comics/Dreams**
-   - **Comic Factory**: Story prompt → multi-panel generation
-   - **Dream State**: Free-run consolidation/hallucination on chaos buffer
-   - **Playground**: Chat/generate with active lobe
+#### 5. Create Video Timelines (Video Timeline Factory)
+- Put videos (optional .srt subtitles) in folder
+- Open **Video Timeline Factory**
+- Set extract FPS/audio seconds → START PRODUCTION
+- Outputs timed triplets (PNG frame + WAV clip + TXT subtitle)
+
+#### 6. Generate Comics/Dreams
+- **Comic Factory**: Story prompt → multi-panel generation
+- **Dream State**: Free-run consolidation/hallucination on chaos buffer
+- **Playground**: Chat/generate with active lobe
 
 ### Adding New Genetics (Model Architectures)
 AEIOU is an experimental playground—adding new "genetics" (architectures) is easy and encouraged.
@@ -78,7 +78,7 @@ AEIOU is an experimental playground—adding new "genetics" (architectures) is e
    - `NucleusConfig` class (hyperparams)
    - `Model` class inheriting from `MultimodalBase`
 
-   Minimal template:
+   **Minimal template:**
    ```python
    INFO = {
        "name": "My Custom Arch",
@@ -109,10 +109,9 @@ AEIOU is an experimental playground—adding new "genetics" (architectures) is e
 
 3. Restart GUI—new option appears in Cortex Control.
 
-**Pro Tip: Use an AI to Generate Code**  
-Paste this into Grok, Gemini, Claude, or any strong LLM to brainstorm a full genetics file:
+**Pro Tip: Use an AI to Generate Code** Paste this into Grok, Gemini, Claude, or any strong LLM to brainstorm a full genetics file:
 
-```
+```text
 I'm adding a new model architecture to AEIOU Brain, a local multimodal PyTorch project.
 The base class is MultimodalBase (handles V→A→C→T fusion with projections and RoPE).
 
@@ -128,28 +127,25 @@ Output:
 1. INFO dict
 2. NucleusConfig class
 3. Full Model class with __init__ and forward()
-
-
+```
 Iterate by pasting back output and asking for fixes.
 
 PRs with new genetics welcome!
 
 ### Author
-Created and maintained by **Frederick von Rönge**  
-- GitHub: [@vonronge](https://github.com/vonronge)  
+Created and maintained by **Frederick von Rönge** - GitHub: [@vonronge](https://github.com/vonronge)  
 - LinkedIn: [frederick-von-rönge](https://www.linkedin.com/in/vonronge/)
 
 ### Quick Start
 ```bash
-git clone https://github.com/vonronge/aeiou-brain.git
+git clone [https://github.com/vonronge/aeiou-brain.git](https://github.com/vonronge/aeiou-brain.git)
 cd aeiou-brain
 python genesis.py          # Setup folders
 python GUI.py              # Launch GUI
 # Headless training:
 python telepathy.py --headless --mode=train --lobe=1 --data="./Training_Data/MyFolder"
-
+```
 
 MIT Licensed — experiment freely, share improvements.
 
 Feedback and PRs welcome! This is an ongoing personal research project.
-```
