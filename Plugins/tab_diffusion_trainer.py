@@ -173,7 +173,7 @@ class Plugin:
         f1 = ttk.Frame(fr_mask)
         f1.pack(fill="x", pady=2)
         ttk.Checkbutton(f1, text="Phase 1: Uniform", variable=self.use_uniform).pack(side="left")
-        ttk.Label(f1, text="Ratio:").pack(side="left", padx=5)
+        ttk.Label(f1, text="Ratio:", font=small_font).pack(side="left", padx=5)
         ttk.Entry(f1, textvariable=self.uniform_ratio_min, width=5).pack(side="left")
         ttk.Label(f1, text="-").pack(side="left")
         ttk.Entry(f1, textvariable=self.uniform_ratio_max, width=5).pack(side="left")
@@ -181,7 +181,7 @@ class Plugin:
         f2 = ttk.Frame(fr_mask)
         f2.pack(fill="x", pady=2)
         ttk.Checkbutton(f2, text="Phase 2: Cross-Modal", variable=self.use_cross_modal).pack(side="left")
-        ttk.Label(f2, text="Prob:").pack(side="left", padx=5)
+        ttk.Label(f2, text="Prob:", font=small_font).pack(side="left", padx=5)
         ttk.Scale(f2, from_=0.0, to=1.0, variable=self.cross_modal_prob, length=100).pack(side="left")
 
         f3 = ttk.Frame(fr_mask)
@@ -267,7 +267,22 @@ class Plugin:
         self.canvas.pack(side="left", fill="both", expand=True)
         scr.pack(side="right", fill="y")
 
-    # --- LOGGING MANAGEMENT ---
+    # --- QUEUE & LOG MANAGEMENT ---
+    def _process_gui_queue(self):
+        """Polls the queue and executes GUI updates in the main thread"""
+        while not self.update_queue.empty():
+            try:
+                func = self.update_queue.get_nowait()
+                func()
+            except queue.Empty:
+                break
+            except Exception:
+                pass
+
+        # Schedule next poll
+        if self.parent:
+            self.parent.after(100, self._process_gui_queue)
+
     def _log_threadsafe(self, msg, tag="info"):
         if self.parent is None:
             # Headless logging
@@ -344,11 +359,11 @@ class Plugin:
         self._log_threadsafe(f"Scanning {folder}...", "info")
 
         ext_map = {
-            'v': {'.png', '.jpg', '.jpeg', '.bmp'},
-            'a': {'.mp3', '.wav', '.flac'},
-            'c': {'.json', '.csv'},
+            'v': {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp'},
+            'a': {'.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac'},
+            'c': {'.json', '.csv', '.ctl'},
             't': {'.txt', '.md', '.json', '.pdf', '.epub', '.mobi', '.rtf', '.doc', '.docx', '.srt', '.vtt', '.ass'},
-            'vid': {'.mp4', '.mkv', '.avi'}
+            'vid': {'.mp4', '.mkv', '.avi', '.mov'}
         }
         all_valid_exts = set().union(*ext_map.values())
         file_sets = {}
