@@ -1,5 +1,6 @@
 {
   "system_name": "AEIOU_v16",
+  "ui_scale": 1.65,
   "colors": {
     "BG_MAIN": "#0b0f19",
     "BG_CARD": "#131620",
@@ -15,29 +16,12 @@
     "GRID": "#333333",
     "SCROLL": "#2B3042"
   },
-  "evolution_settings": {
-    "shadow_mode_enabled": false,
-    "commando_protocol": true,
-    "mutation_rate": "high"
-  },
+  "data_dir": "D:\\AEIOU_Brain\\Training_Data",
+  "chaos_dir": "D:\\AEIOU_Brain\\Training_Data\\Chaos_Buffer",
+  "output_dir": "D:\\AEIOU_Brain\\Training_Data\\Comics_Output",
   "last_active_lobe": 3,
-  "tab_order": [
-    "Cortex Control",
-    "Playground",
-    "Memory Graph",
-    "Memory Agent",
-    "Transformer Trainer",
-    "Dream State",
-    "Lecture Factory",
-    "Video Timeline Factory",
-    "Comic Scanner",
-    "Symbiosis",
-    "The Council",
-    "Telemetry",
-    "System Config",
-    "Diffusion Director",
-    "RLM Reasoning"
-  ],
+  "window_geometry": "3840x2019+70+-33",
+  "window_state": "zoomed",
   "sidebar_order": [
     "tab_cortex",
     "tab_trainer",
@@ -56,11 +40,5 @@
     "tab_pdf_repair",
     "tab_settings",
     "tab_lecture_factory"
-  ],
-  "ui_scale": 1.65,
-  "data_dir": "D:\\AEIOU_Brain\\Training_Data",
-  "chaos_dir": "D:\\AEIOU_Brain\\Training_Data\\Chaos_Buffer",
-  "output_dir": "D:\\AEIOU_Brain\\Training_Data\\Comics_Output",
-  "window_geometry": "3840x2019+70+-33",
-  "window_state": "zoomed"
+  ]
 }

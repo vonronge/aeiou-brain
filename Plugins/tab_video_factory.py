@@ -14,11 +14,12 @@ persistent memory graphs, and local multimodal training.
 """
 
 # FILE: Plugins/tab_video_factory.py
+
+
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
 import os
-import asyncio
 from datetime import datetime
 import cv2
 import numpy as np
@@ -26,25 +27,24 @@ import torch
 import torchaudio
 from PIL import Image
 import subprocess
-import json  # Added for Motion Data storage
+import json
+import traceback
 
-# --- ROBUST IMPORTS ---
+# --- DEPENDENCY CHECK ---
 try:
-    # MoviePy handles audio extraction safely on Windows
     from moviepy.editor import AudioFileClip
 
     HAS_MOVIEPY = True
 except ImportError:
     HAS_MOVIEPY = False
-    print(" ! Install: pip install moviepy")
+    print(" ! VideoFactory: Install 'moviepy' for audio extraction.")
 
 try:
-    # We use imageio's ffmpeg binary because we know it exists if moviepy is installed
     import imageio_ffmpeg
 
     FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
 except ImportError:
-    FFMPEG_EXE = "ffmpeg"  # Hope it's in PATH
+    FFMPEG_EXE = "ffmpeg"
 
 try:
     from pysrt import SubRipFile
@@ -52,314 +52,285 @@ try:
     HAS_PYSRT = True
 except ImportError:
     HAS_PYSRT = False
-    print(" ! Install: pip install pysrt")
+    print(" ! VideoFactory: Install 'pysrt' for subtitle syncing.")
 
 
 class Plugin:
     def __init__(self, parent, app):
         self.parent = parent
         self.app = app
-        self.name = "Video Timeline Factory"
-        self.factory_running = False
-        self.factory_stop = False
-        self.factory_queue = []
-        self.folder_path = tk.StringVar(value="D:/Training_Data")
+        self.name = "Video Factory"
+
+        # State
+        self.is_running = False
+        self.stop_requested = False
+        self.queue = []
+
+        # Paths
+        default_data = self.app.paths.get("data", "D:/Training_Data")
+        self.source_path = tk.StringVar(value=default_data)
+
+        # Settings
+        self.fps_var = tk.DoubleVar(value=2.0)  # Extract 2 frames per second
+        self.audio_len_var = tk.DoubleVar(value=2.0)  # 2 seconds of audio per frame
         self.skip_existing = tk.BooleanVar(value=True)
         self.auto_scroll = tk.BooleanVar(value=True)
-
-        # Slicing Configuration
-        self.target_fps = tk.DoubleVar(value=2.0)
-        self.audio_seconds = tk.DoubleVar(value=2.0)
+        self.gen_physics = tk.BooleanVar(value=True)  # Generate Optical Flow (Control)
 
         self._setup_ui()
 
     def _setup_ui(self):
-        top = ttk.LabelFrame(self.parent, text="Video Timeline Production (v4 - Physics Aware)", padding=15)
-        top.pack(fill="x", padx=20, pady=10)
+        # 1. HEADER & CONTROLS
+        top = ttk.LabelFrame(self.parent, text="Timeline Slicer Configuration", padding=15)
+        top.pack(fill="x", padx=10, pady=10)
 
-        row1 = ttk.Frame(top)
-        row1.pack(fill="x", pady=5)
-        ttk.Entry(row1, textvariable=self.folder_path).pack(side="left", fill="x", expand=True, padx=5)
-        ttk.Button(row1, text="📂 Choose Folder", command=self._browse).pack(side="left", padx=2)
-        ttk.Button(row1, text="🔍 Scan Videos", command=self._scan_videos).pack(side="left", padx=2)
+        # Path Row
+        r1 = ttk.Frame(top)
+        r1.pack(fill="x", pady=5)
+        ttk.Label(r1, text="Source Folder:", width=12).pack(side="left")
+        ttk.Entry(r1, textvariable=self.source_path).pack(side="left", fill="x", expand=True, padx=5)
+        ttk.Button(r1, text="📂", width=4, command=self._browse).pack(side="left")
+        ttk.Button(r1, text="SCAN", command=self._scan).pack(side="left", padx=(5, 0))
 
-        row2 = ttk.Frame(top)
-        row2.pack(fill="x", pady=5)
-        ttk.Label(row2, text="Extract FPS:").pack(side="left")
-        ttk.Spinbox(row2, from_=0.5, to=30.0, increment=0.5, textvariable=self.target_fps, width=5).pack(side="left",
-                                                                                                         padx=5)
+        # Config Row
+        r2 = ttk.Frame(top)
+        r2.pack(fill="x", pady=10)
 
-        ttk.Label(row2, text="| Audio Context (Sec):").pack(side="left", padx=10)
-        ttk.Spinbox(row2, from_=0.5, to=5.0, increment=0.5, textvariable=self.audio_seconds, width=5).pack(side="left",
-                                                                                                           padx=5)
+        ttk.Label(r2, text="Extraction FPS:").pack(side="left")
+        ttk.Spinbox(r2, from_=0.1, to=30.0, increment=0.5, textvariable=self.fps_var, width=5).pack(side="left", padx=5)
 
-        row3 = ttk.Frame(top)
-        row3.pack(fill="x", pady=5)
-        self.btn_start = ttk.Button(row3, text="START PRODUCTION", command=self._start_factory, state="disabled")
-        self.btn_start.pack(side="left", fill="x", expand=True, padx=2)
-        ttk.Checkbutton(row3, text="Skip Existing Slices", variable=self.skip_existing).pack(side="right", padx=10)
+        ttk.Label(r2, text="Audio Window (s):").pack(side="left", padx=(15, 0))
+        ttk.Spinbox(r2, from_=0.1, to=10.0, increment=0.5, textvariable=self.audio_len_var, width=5).pack(side="left",
+                                                                                                          padx=5)
 
-        log_frame = ttk.LabelFrame(self.parent, text="Factory Log", padding=15)
-        log_frame.pack(fill="both", expand=True, padx=20, pady=10)
+        ttk.Checkbutton(r2, text="Calc Optical Flow (Physics)", variable=self.gen_physics).pack(side="left", padx=20)
+        ttk.Checkbutton(r2, text="Skip Existing", variable=self.skip_existing).pack(side="left", padx=5)
 
-        tool_fr = ttk.Frame(log_frame)
-        tool_fr.pack(fill="x")
-        ttk.Checkbutton(tool_fr, text="Autoscroll", variable=self.auto_scroll).pack(side="right")
+        # 2. ACTION BUTTON
+        self.btn_run = ttk.Button(top, text="START PRODUCTION LINE", command=self._toggle_run, state="disabled")
+        self.btn_run.pack(fill="x", pady=(10, 0))
 
-        self.log_box = tk.Text(log_frame, font=("Consolas", int(9 * getattr(self.app, 'ui_scale', 1.0))), bg=self.app.colors["BG_MAIN"],
-                               fg=self.app.colors["FG_TEXT"], borderwidth=0)
+        # 3. LOG OUTPUT
+        log_fr = ttk.LabelFrame(self.parent, text="Factory Telemetry", padding=10)
+        log_fr.pack(fill="both", expand=True, padx=10, pady=5)
+
+        self.log_box = tk.Text(log_fr, font=("Consolas", int(9 * getattr(self.app, 'ui_scale', 1.0))),
+                               bg=self.app.colors["BG_MAIN"], fg=self.app.colors["FG_TEXT"], borderwidth=0)
         self.log_box.pack(side="left", fill="both", expand=True)
 
-        sb = ttk.Scrollbar(log_frame, orient="vertical", command=self.log_box.yview)
-        self.log_box.configure(yscrollcommand=sb.set)
+        sb = ttk.Scrollbar(log_fr, command=self.log_box.yview)
         sb.pack(side="right", fill="y")
+        self.log_box.config(yscrollcommand=sb.set)
 
-        self.log_box.tag_config("info", foreground=self.app.colors["ACCENT"])
+        # Tags
+        self.log_box.tag_config("info", foreground=self.app.colors["FG_DIM"])
+        self.log_box.tag_config("proc", foreground=self.app.colors["ACCENT"])
         self.log_box.tag_config("success", foreground=self.app.colors["SUCCESS"])
-        self.log_box.tag_config("error", foreground=self.app.colors["ERROR"])
         self.log_box.tag_config("warn", foreground=self.app.colors["WARN"])
-        self.log_box.tag_config("motion", foreground="#FDD663")  # Yellow for physics data
+        self.log_box.tag_config("err", foreground=self.app.colors["ERROR"])
 
     def _browse(self):
         d = filedialog.askdirectory()
-        if d: self.folder_path.set(d)
+        if d: self.source_path.set(d)
 
     def _log(self, msg, tag="info"):
         ts = datetime.now().strftime('%H:%M:%S')
         self.log_box.insert(tk.END, f"[{ts}] {msg}\n", tag)
         if self.auto_scroll.get(): self.log_box.see(tk.END)
 
-    def _scan_videos(self):
-        folder = self.folder_path.get()
-        if not os.path.exists(folder):
-            messagebox.showerror("Error", "Folder not found")
-            return
+    def _scan(self):
+        folder = self.source_path.get()
+        if not os.path.exists(folder): return
 
-        videos = []
+        self.queue = []
+        valid_exts = {'.mp4', '.mkv', '.avi', '.mov', '.webm'}
+
         for root, _, files in os.walk(folder):
             for f in files:
-                if f.lower().endswith(('.mp4', '.mkv', '.avi', '.mov')):
-                    videos.append(os.path.join(root, f))
+                if os.path.splitext(f)[1].lower() in valid_exts:
+                    self.queue.append(os.path.join(root, f))
 
-        self.factory_queue = videos
-        self._log(f"Found {len(videos)} video files.", "success")
-        if videos: self.btn_start.config(state="normal")
+        self._log(f"Scanner found {len(self.queue)} video files.", "success")
+        if self.queue:
+            self.btn_run.config(state="normal")
 
-    def _start_factory(self):
-        if self.factory_running:
-            self.factory_stop = True
-            self.btn_start.config(text="STOPPING...")
-            return
+    def _toggle_run(self):
+        if self.is_running:
+            self.stop_requested = True
+            self.btn_run.config(text="STOPPING...")
+        else:
+            if not self.queue: self._scan()
+            if not self.queue: return
 
-        if not self.factory_queue: self._scan_videos()
-        if not self.factory_queue: return
+            if not HAS_MOVIEPY:
+                messagebox.showerror("Dependency Error", "Please install 'moviepy' to slice audio.")
+                return
 
-        if not HAS_MOVIEPY:
-            self._log("ERROR: 'moviepy' not installed. Audio extraction will fail.", "error")
-            return
+            self.is_running = True
+            self.stop_requested = False
+            self.btn_run.config(text="HALT FACTORY")
+            threading.Thread(target=self._worker, daemon=True).start()
 
-        self.factory_running = True
-        self.factory_stop = False
-        self.btn_start.config(text="STOP PRODUCTION")
-        threading.Thread(target=self._factory_worker, daemon=True).start()
+    def _worker(self):
+        try:
+            total_vids = len(self.queue)
 
-    def _factory_worker(self):
-        loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(loop)
-        loop.run_until_complete(self._async_pipeline())
-        loop.close()
+            for i, vid_path in enumerate(self.queue):
+                if self.stop_requested: break
 
-        self.factory_running = False
-        self.parent.after(0, lambda: self.btn_start.config(text="START PRODUCTION"))
-        self.parent.after(0, lambda: self._log("Production Run Complete.", "success"))
+                vid_name = os.path.basename(vid_path)
+                base_name = os.path.splitext(vid_name)[0]
+                parent_dir = os.path.dirname(vid_path)
 
-    async def _async_pipeline(self):
-        semaphore = asyncio.Semaphore(1)
-        for i, video_path in enumerate(self.factory_queue):
-            if self.factory_stop: break
-            name = os.path.basename(video_path)
-            self.parent.after(0, lambda m=f"Processing {i + 1}/{len(self.factory_queue)}: {name}": self._log(m))
-            await self._process_video(video_path, semaphore)
+                # Output folder: adjacent to video, named "VideoName_timeline"
+                out_dir = os.path.join(parent_dir, f"{base_name}_timeline")
+                if not os.path.exists(out_dir): os.makedirs(out_dir)
 
-    async def _process_video(self, video_path, semaphore):
-        async with semaphore:
-            name = os.path.basename(video_path)
-            temp_wav = os.path.join(os.path.dirname(video_path), "temp_extract_audio.wav")
-            temp_srt = os.path.join(os.path.dirname(video_path), "temp_extract_subs.srt")
+                self.parent.after(0, lambda m=f"Processing {i + 1}/{total_vids}: {vid_name}": self._log(m, "proc"))
 
-            try:
-                # 1. Setup Output
-                base_name = os.path.splitext(name)[0]
-                output_dir = os.path.join(os.path.dirname(video_path), f"{base_name}_timeline")
-                if not os.path.exists(output_dir): os.makedirs(output_dir)
+                # --- PRE-PROCESSING ---
 
-                # --- 2. SUBTITLE EXTRACTION LOGIC ---
+                # 1. Audio Extraction (Full track to RAM/Temp)
+                temp_wav = os.path.join(parent_dir, "_temp_audio.wav")
+                has_audio = False
+                try:
+                    clip = AudioFileClip(vid_path)
+                    clip.write_audiofile(temp_wav, fps=24000, nbytes=2, verbose=False, logger=None)
+                    clip.close()
+                    waveform, sr = torchaudio.load(temp_wav)
+                    has_audio = True
+                except Exception as e:
+                    self.parent.after(0, lambda: self._log(f"Audio extraction failed (silent mode): {e}", "warn"))
+                    waveform = None
+                    sr = 24000
+
+                # 2. Subtitle Extraction
                 subs = None
-                sidecar_srt = os.path.splitext(video_path)[0] + ".srt"
-
-                # A. Try Sidecar
-                if os.path.exists(sidecar_srt):
+                sidecar = os.path.splitext(vid_path)[0] + ".srt"
+                if os.path.exists(sidecar) and HAS_PYSRT:
                     try:
-                        subs = SubRipFile.open(sidecar_srt, encoding='utf-8')
-                        self.parent.after(0, lambda: self._log(f" > Found Sidecar Subtitles.", "info"))
+                        subs = SubRipFile.open(sidecar, encoding='utf-8')
+                        self.parent.after(0, lambda: self._log("Loaded sidecar subtitles.", "info"))
                     except:
                         pass
 
-                # B. Try Embedded (FFMPEG Rip)
-                if not subs:
-                    try:
-                        cmd = [FFMPEG_EXE, '-i', video_path, '-map', '0:s:0', temp_srt, '-y']
-                        subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=30)
-
-                        if os.path.exists(temp_srt) and os.path.getsize(temp_srt) > 0:
-                            subs = SubRipFile.open(temp_srt, encoding='utf-8')
-                            self.parent.after(0, lambda: self._log(f" > Extracted Embedded Subtitles.", "info"))
-                        else:
-                            self.parent.after(0, lambda: self._log(f" > No text track found.", "warn"))
-                    except Exception as e:
-                        self.parent.after(0, lambda: self._log(f" > Sub Extraction failed: {e}", "warn"))
-
-                # --- 3. AUDIO EXTRACTION LOGIC ---
-                self.parent.after(0, lambda: self._log(f" > Extracting full audio track...", "info"))
-                try:
-                    audioclip = AudioFileClip(video_path)
-                    audioclip.write_audiofile(temp_wav, fps=24000, nbytes=2, verbose=False, logger=None)
-                    audioclip.close()
-                    waveform, sr = torchaudio.load(temp_wav)
-                except Exception as ae:
-                    self.parent.after(0, lambda m=str(ae): self._log(f" > Audio Extract Failed: {m}", "error"))
-                    # Fallback silent audio
-                    cap_check = cv2.VideoCapture(video_path)
-                    fps_check = cap_check.get(cv2.CAP_PROP_FPS)
-                    frames_check = int(cap_check.get(cv2.CAP_PROP_FRAME_COUNT))
-                    cap_check.release()
-                    waveform = torch.zeros(1, int(frames_check / fps_check * 24000) if fps_check > 0 else 24000)
-                    sr = 24000
-
-                # --- 4. SLICING LOOP (MOTION ENHANCED) ---
-                cap = cv2.VideoCapture(video_path)
+                # --- SLICING LOOP ---
+                cap = cv2.VideoCapture(vid_path)
                 fps = cap.get(cv2.CAP_PROP_FPS)
                 if fps <= 0: fps = 24.0
 
-                extract_rate = self.target_fps.get()
-                frame_interval = max(1, int(fps / extract_rate))
-                audio_window = self.audio_seconds.get()
+                target_interval = int(fps / self.fps_var.get())
+                if target_interval < 1: target_interval = 1
 
-                frame_cursor = 0
-                slice_count = 0
-
-                # Motion State
-                prev_gray = None
+                frame_idx = 0
+                slice_idx = 0
+                prev_gray = None  # For Optical Flow
 
                 while cap.isOpened():
-                    if self.factory_stop: break
+                    if self.stop_requested: break
+
                     ret, frame = cap.read()
                     if not ret: break
 
-                    # Convert to grayscale for flow
+                    # Optical Flow Calculation (Physics/Context Channel)
                     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+                    control_vec = [0.0, 0.0]
 
-                    if frame_cursor % frame_interval == 0:
-                        timestamp_sec = frame_cursor / fps
-                        slice_id = slice_count + 1
-                        out_base = os.path.join(output_dir, f"{base_name}_p{slice_id:05d}")
+                    if self.gen_physics.get() and prev_gray is not None:
+                        # Farneback Dense Flow
+                        flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
+                        # Average motion vector for the whole frame (Simplified Physics)
+                        avg_flow = np.mean(flow, axis=(0, 1))
+                        # Normalize/Scale for embedding
+                        control_vec = [float(avg_flow[0]) / 5.0, float(avg_flow[1]) / 5.0]
 
-                        # Skip existing check
-                        if self.skip_existing.get() and os.path.exists(f"{out_base}.json"):
-                            # Still need to update motion tracking state
-                            prev_gray = gray
-                            frame_cursor += 1
-                            continue
+                    # Capture Slice
+                    if frame_idx % target_interval == 0:
+                        timestamp = frame_idx / fps
 
-                        # 1. IMAGE
-                        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                        img = Image.fromarray(frame_rgb).resize((256, 256))
-                        img.save(f"{out_base}.png")
+                        # File Naming (Narrative Order)
+                        # e.g., vid_name_p0001.png
+                        fname_base = f"{base_name}_p{slice_idx:05d}"
+                        out_path_base = os.path.join(out_dir, fname_base)
 
-                        # 2. OPTICAL FLOW (Control Channel)
-                        flow_vector = [0.0, 0.0]
-                        if prev_gray is not None:
-                            # Dense Optical Flow (Farneback)
-                            # Params: prev, next, flow, pyr_scale, levels, winsize, iterations, poly_n, poly_sigma, flags
-                            flow = cv2.calcOpticalFlowFarneback(
-                                prev_gray, gray, None,
-                                0.5, 3, 15, 3, 5, 1.2, 0
-                            )
-                            # Average flow across the entire frame
-                            avg_flow = np.mean(flow, axis=(0, 1))
+                        if self.skip_existing.get() and os.path.exists(f"{out_path_base}.png"):
+                            pass  # Skip saving, but update state
+                        else:
+                            # A. SAVE VISUAL (V)
+                            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                            img = Image.fromarray(rgb).resize((256, 256))
+                            img.save(f"{out_path_base}.png")
 
-                            # Normalize heuristic (approximate velocity scaling)
-                            flow_vector = [float(avg_flow[0])/10.0, float(avg_flow[1])/10.0]
+                            # B. SAVE AUDIO (A)
+                            if has_audio:
+                                center_sample = int(timestamp * sr)
+                                half_win = int((self.audio_len_var.get() / 2) * sr)
+                                start = max(0, center_sample - half_win)
+                                end = min(waveform.shape[1], center_sample + half_win)
 
-                        # Save Control/Physics Data
-                        control_data = {
-                            "control_vec": flow_vector,
-                            "meta": {
-                                "fps": fps,
-                                "ts": timestamp_sec,
-                                "source": name
+                                audio_slice = waveform[:, start:end]
+                                # Pad if too short (at edges)
+                                target_len = int(self.audio_len_var.get() * sr)
+                                if audio_slice.shape[1] < target_len:
+                                    pad = target_len - audio_slice.shape[1]
+                                    audio_slice = torch.cat([audio_slice, torch.zeros(audio_slice.shape[0], pad)],
+                                                            dim=1)
+
+                                torchaudio.save(f"{out_path_base}.wav", audio_slice, sr)
+
+                            # C. SAVE TEXT (T)
+                            txt_content = ""
+                            if subs:
+                                cur_ms = timestamp * 1000
+                                # Find active sub
+                                # Simple linear search (can be optimized, but fine for factory speed)
+                                for sub in subs:
+                                    if sub.start.ordinal <= cur_ms <= sub.end.ordinal:
+                                        txt_content = sub.text.replace('\n', ' ')
+                                        break
+
+                            with open(f"{out_path_base}.txt", "w", encoding='utf-8') as f:
+                                f.write(txt_content)
+
+                            # D. SAVE CONTROL/PHYSICS (C)
+                            # Future-proofing: Saving as JSON for flexible metadata loading
+                            c_data = {
+                                "control_vec": control_vec,
+                                "timestamp": timestamp,
+                                "source": vid_name
                             }
-                        }
-                        with open(f"{out_base}.json", 'w', encoding='utf-8') as f:
-                            json.dump(control_data, f)
+                            with open(f"{out_path_base}.json", "w", encoding='utf-8') as f:
+                                json.dump(c_data, f)
 
-                        # 3. AUDIO SLICE
-                        center_sample = int(timestamp_sec * sr)
-                        half_window = int((audio_window / 2) * sr)
-                        start_s = max(0, center_sample - half_window)
-                        end_s = min(waveform.shape[1], center_sample + half_window)
-                        clip = waveform[:, start_s:end_s]
+                        slice_idx += 1
+                        if slice_idx % 50 == 0:
+                            self.parent.after(0, lambda c=slice_idx: self._log(f" -> Generated {c} engrams...", "info"))
 
-                        target_samples = int(audio_window * sr)
-                        if clip.shape[1] < target_samples:
-                            pad = target_samples - clip.shape[1]
-                            clip = torch.cat([clip, torch.zeros(clip.shape[0], pad)], dim=1)
-
-                        torchaudio.save(f"{out_base}.wav", clip, sr)
-
-                        # 4. TEXT SYNC
-                        txt_out = ""
-                        if subs:
-                            current_ms = timestamp_sec * 1000
-                            matches = []
-                            for sub in subs:
-                                if sub.start.ordinal <= current_ms <= sub.end.ordinal:
-                                    matches.append(sub.text)
-                                elif sub.start.ordinal > current_ms:
-                                    break
-                            if matches:
-                                txt_out = " ".join(matches).replace('\n', ' ')
-
-                        with open(f"{out_base}.txt", 'w', encoding='utf-8') as f:
-                            f.write(txt_out)
-
-                        slice_count += 1
-                        if slice_count % 10 == 0:
-                            v_str = f"[{flow_vector[0]:.2f}, {flow_vector[1]:.2f}]"
-                            self.parent.after(0, lambda n=slice_count, t=timestamp_sec, v=v_str:
-                            self._log(f" > Slice {n} @ {t:.1f}s | Flow: {v}", "motion"))
-
-                    # Update Motion State
+                    # Update state
                     prev_gray = gray
-                    frame_cursor += 1
+                    frame_idx += 1
 
                 cap.release()
 
-                # Cleanup temps
-                for tmp in [temp_wav, temp_srt]:
-                    if os.path.exists(tmp):
-                        try:
-                            os.remove(tmp)
-                        except:
-                            pass
+                # Cleanup temp audio
+                if os.path.exists(temp_wav):
+                    try:
+                        os.remove(temp_wav)
+                    except:
+                        pass
 
-                self.parent.after(0, lambda: self._log(f"Completed {name}: {slice_count} slices.", "success"))
+                self.parent.after(0, lambda n=vid_name, c=slice_idx: self._log(f"Completed {n}: {c} Quadruplets.",
+                                                                               "success"))
 
-            except Exception as e:
-                self.parent.after(0, lambda m=str(e): self._log(f"CRITICAL ERROR {name}: {m}", "error"))
-                import traceback
-                traceback.print_exc()
+        except Exception as e:
+            traceback.print_exc()
+            self.parent.after(0, lambda err=str(e): self._log(f"CRITICAL ERROR: {err}", "err"))
+
+        finally:
+            self.is_running = False
+            self.parent.after(0, lambda: self.btn_run.config(text="START PRODUCTION LINE"))
 
     def on_theme_change(self):
         c = self.app.colors
-        if hasattr(self, 'log_box'): self.log_box.config(bg=c["BG_MAIN"], fg=c["FG_TEXT"])
+        if hasattr(self, 'log_box'):
+            self.log_box.config(bg=c["BG_MAIN"], fg=c["FG_TEXT"])

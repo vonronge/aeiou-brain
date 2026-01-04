@@ -13,89 +13,99 @@ for experimenting with hybrid autoregressive + diffusion architectures,
 persistent memory graphs, and local multimodal training.
 """
 
-import torch
-import torch.nn.functional as F
 import os
 import json
 import yaml
 import time
 import uuid
-import numpy as np
+import torch
+import torch.nn.functional as F
 from datetime import datetime
+from typing import Optional, List, Tuple, Any
 
-# --- OPTIONAL: FAISS FOR SCALE ---
+# --- VECTOR STORE OPTIMIZATION ---
 try:
     import faiss
 
     HAS_FAISS = True
 except ImportError:
     HAS_FAISS = False
-    print(" ! Hippocampus: FAISS not found. Using PyTorch fallback (slower at >10k nodes).")
-    print("   Run: pip install faiss-cpu")
 
 
 class EntityNode:
     """
-    Represents a single node in the Knowledge Graph.
+    A single neuron in the semantic graph.
     """
 
     def __init__(self, entity_name, entity_type, content):
         self.id = str(uuid.uuid4())
         self.entity = entity_name
         self.type = entity_type
-        self.data = content  # The YAML dictionary
-        self.embedding = None  # Tensor [1, D] (Kept for syncing)
+        self.data = content  # The full YAML dictionary
+        self.embedding = None  # Tensor [1, D] (Transient, not saved in YAML)
         self.last_accessed = time.time()
 
 
 class Organelle_Hippocampus:
-    def __init__(self, memory_dir, device="cuda"):
+    def __init__(self, memory_dir: str, device: str = "cuda", golgi=None):
         self.memory_dir = memory_dir
         self.device = device
+        self.golgi = golgi
 
-        # Paths
+        # File Paths
         self.graph_path = os.path.join(memory_dir, "knowledge_graph.yaml")
         self.vector_path = os.path.join(memory_dir, "semantic_index.faiss")
         self.meta_path = os.path.join(memory_dir, "index_meta.json")
 
-        # In-Memory Stores
+        # In-Memory Graph
         self.nodes = {}  # {entity_name: EntityNode}
 
-        # Vector Store State
-        self.vector_map = []  # Maps index ID -> entity_name
+        # Vector Index State
+        self.vector_map = []  # Maps numeric ID -> entity_name
         self.faiss_index = None
         self.torch_index = None
-        self.dimension = 768  # Default embedding size
+        self.dimension = 768  # Standard embedding size
 
+        # Initialize Systems
         self._init_vector_store()
         self.load_memory()
 
-        # Bootstrap
+        # Bootstrap if empty
         if "My Knowledge Graph" not in self.nodes:
             self._bootstrap_meta_memory()
 
+    def _log(self, msg, tag="INFO"):
+        if self.golgi:
+            # Map tag to Golgi method
+            method = getattr(self.golgi, tag.lower(), self.golgi.info)
+            method(msg, source="Hippocampus")
+        else:
+            print(f"[Hippocampus:{tag}] {msg}")
+
     def _init_vector_store(self):
         if HAS_FAISS:
-            # Inner Product (Cosine sim if vectors are normalized)
+            # Inner Product (Cosine Similarity if normalized)
             self.faiss_index = faiss.IndexFlatIP(self.dimension)
+            if not self.golgi: print("[Hippocampus] FAISS Accelerated Index Active.")
         else:
             self.torch_index = torch.empty(0, self.dimension).to(self.device)
+            self._log("FAISS not found. Using PyTorch fallback (slower).", "WARN")
 
     def _bootstrap_meta_memory(self):
         seed_yaml = {
             "entity": "My Knowledge Graph",
             "type": "System/Meta",
-            "core_summary": "The central index of all persistent memories stored by the AI.",
+            "core_summary": "The central index of all persistent memories.",
             "key_facts": ["Tracks Entity Counts", "Maintains Global Timeline"],
             "relations": [],
             "timeline": [f"{datetime.now().strftime('%Y-%m-%d')}: System Genesis"],
             "last_updated": datetime.now().strftime('%Y-%m-%d'),
             "confidence": "high"
         }
-        # Create without embedding initially
-        self.create_memory_node(seed_yaml, "My Knowledge Graph", "System/Meta", None)
+        self.nodes["My Knowledge Graph"] = EntityNode("My Knowledge Graph", "System/Meta", seed_yaml)
 
-    # --- IO OPERATIONS ---
+    # --- I/O OPERATIONS ---
+
     def load_memory(self):
         # 1. Load Graph (YAML)
         if os.path.exists(self.graph_path):
@@ -105,9 +115,9 @@ class Organelle_Hippocampus:
                     for name, node_data in data.items():
                         node = EntityNode(name, node_data.get('type', 'Unknown'), node_data)
                         self.nodes[name] = node
-                print(f" > Hippocampus: Loaded {len(self.nodes)} semantic nodes.")
+                self._log(f"Loaded {len(self.nodes)} semantic nodes.", "INFO")
             except Exception as e:
-                print(f" ! Graph Load Error: {e}")
+                self._log(f"Graph Load Error: {e}", "ERROR")
 
         # 2. Load Vector Index
         if HAS_FAISS and os.path.exists(self.vector_path):
@@ -117,15 +127,15 @@ class Organelle_Hippocampus:
                     with open(self.meta_path, 'r') as f:
                         self.vector_map = json.load(f)
             except Exception as e:
-                print(f" ! FAISS Load Error: {e}")
+                self._log(f"FAISS Load Error: {e}", "ERROR")
+
         elif not HAS_FAISS and os.path.exists(self.vector_path + ".pt"):
-            # Fallback for torch
             try:
                 pkg = torch.load(self.vector_path + ".pt", map_location=self.device)
                 self.torch_index = pkg['vectors']
                 self.vector_map = pkg['map']
-            except:
-                pass
+            except Exception as e:
+                self._log(f"Torch Index Load Error: {e}", "ERROR")
 
     def save_memory(self):
         # 1. Save Graph
@@ -134,7 +144,7 @@ class Organelle_Hippocampus:
             with open(self.graph_path, 'w', encoding='utf-8') as f:
                 yaml.dump(export_data, f, sort_keys=False, allow_unicode=True)
         except Exception as e:
-            print(f" ! Graph Save Error: {e}")
+            self._log(f"Graph Save Error: {e}", "ERROR")
 
         # 2. Save Vectors
         try:
@@ -145,77 +155,69 @@ class Organelle_Hippocampus:
             elif self.torch_index is not None:
                 torch.save({'vectors': self.torch_index, 'map': self.vector_map}, self.vector_path + ".pt")
         except Exception as e:
-            print(f" ! Vector Save Error: {e}")
+            self._log(f"Vector Save Error: {e}", "ERROR")
 
-        print(" > Hippocampus: Consolidated.")
+        self._log("Memory Consolidated.", "SAVE")
 
-    # --- CORE FUNCTIONS ---
+    # --- CORE MEMORY FUNCTIONS ---
 
-    def create_memory_node(self, yaml_dict, entity_name, entity_type, embedding_tensor):
-        # Create Node
-        node = EntityNode(entity_name, entity_type, yaml_dict)
-        self.nodes[entity_name] = node
+    def add_vector(self, entity_name: str, embedding_tensor: torch.Tensor):
+        """Adds an embedding to the index and maps it to the entity name."""
+        if embedding_tensor is None: return
 
-        # Update Vectors
-        if embedding_tensor is not None:
-            self._add_vector(entity_name, embedding_tensor)
-
-        return f"Created: {entity_name}"
-
-    def update_memory_node(self, entity_name, new_yaml_dict, new_embedding=None):
-        if entity_name not in self.nodes: return "Node missing."
-
-        node = self.nodes[entity_name]
-        node.data = new_yaml_dict
-        node.last_updated = time.time()
-
-        if new_embedding is not None:
-            self._add_vector(entity_name,
-                             new_embedding)  # FAISS doesn't support easy update, we append and rely on map logic
-
-        return f"Updated: {entity_name}"
-
-    def _add_vector(self, name, tensor):
         # Normalize for Cosine Similarity
-        tensor = F.normalize(tensor, p=2, dim=1)
+        vector = F.normalize(embedding_tensor, p=2, dim=1)
 
         if HAS_FAISS:
-            np_vec = tensor.cpu().numpy().astype('float32')
+            np_vec = vector.cpu().numpy().astype('float32')
             self.faiss_index.add(np_vec)
-            self.vector_map.append(name)
+            self.vector_map.append(entity_name)
         else:
-            self.torch_index = torch.cat([self.torch_index, tensor.to(self.device)], dim=0)
-            self.vector_map.append(name)
+            self.torch_index = torch.cat([self.torch_index, vector.to(self.device)], dim=0)
+            self.vector_map.append(entity_name)
 
-    def retrieve_relevant(self, query_embedding, top_k=2, threshold=0.4, hops=1):
+    def update_memory_node(self, entity_name: str, new_yaml_dict: dict):
+        """Updates graph data. Does NOT auto-update vectors (requires re-embedding)."""
+        if entity_name not in self.nodes:
+            # Create new
+            self.nodes[entity_name] = EntityNode(entity_name, new_yaml_dict.get("type", "Unknown"), new_yaml_dict)
+        else:
+            # Update existing
+            node = self.nodes[entity_name]
+            node.data = new_yaml_dict
+            node.last_updated = time.time()
+
+    def search(self, query_embedding: torch.Tensor, top_k=3, threshold=0.4, hops=1) -> List[Tuple[float, Any]]:
         """
-        Retrieves nodes + 1-Hop Neighbors (Associative Recall).
+        Associative Recall:
+        1. Finds similar vectors.
+        2. Expands to 1-hop graph neighbors.
+        Returns: List of (score, EntityNode)
         """
         if query_embedding is None: return []
 
-        # Normalize Query
         query_embedding = F.normalize(query_embedding, p=2, dim=1)
-
-        # 1. SEARCH
         hits = []
+
+        # 1. Vector Search
         if HAS_FAISS:
             q_np = query_embedding.cpu().numpy().astype('float32')
-            scores, indices = self.faiss_index.search(q_np, top_k * 2)  # Grab extra candidates
+            scores, indices = self.faiss_index.search(q_np, top_k * 2)  # Over-fetch
             for score, idx in zip(scores[0], indices[0]):
                 if idx < len(self.vector_map) and score > threshold:
                     hits.append(self.vector_map[idx])
         else:
-            sim = F.cosine_similarity(query_embedding, self.torch_index)
-            scores, indices = torch.topk(sim, k=min(top_k * 2, len(self.torch_index)))
-            for score, idx in zip(scores, indices):
-                if score > threshold:
-                    hits.append(self.vector_map[idx.item()])
+            if len(self.torch_index) > 0:
+                sim = F.cosine_similarity(query_embedding, self.torch_index)
+                scores, indices = torch.topk(sim, k=min(top_k * 2, len(self.torch_index)))
+                for score, idx in zip(scores, indices):
+                    if score > threshold:
+                        hits.append(self.vector_map[idx.item()])
 
-        # Deduplicate hits (latest version of entity wins)
-        # (In a naive append-only log, the last index is the newest)
+        # Deduplicate (Latest reference wins)
         unique_hits = list(set(hits))
 
-        # 2. GRAPH EXPANSION (Associativity)
+        # 2. Graph Expansion (Associativity)
         final_set = set(unique_hits)
 
         if hops > 0:
@@ -224,27 +226,30 @@ class Organelle_Hippocampus:
                 node = self.nodes.get(entity)
                 if not node: continue
 
-                # Check relations
-                # Format: "Type -> Target"
+                # Parse "Relations" field
                 rels = node.data.get('relations', [])
                 for rel in rels:
+                    # Format: "Predicate -> Target"
                     if "->" in rel:
                         target = rel.split("->")[-1].strip()
                         if target in self.nodes:
                             neighbors.add(target)
 
-            # Add valid neighbors
             final_set.update(neighbors)
 
-        # 3. Retrieve Nodes
+        # 3. Format Results
         results = []
         for name in final_set:
             if name in self.nodes:
-                results.append((1.0, self.nodes[name]))  # Score is dummy for expanded nodes
+                # Score is 1.0 for neighbors since we don't have vector scores for them all easily
+                results.append((1.0, self.nodes[name]))
 
-        return results[:top_k + 2]  # Limit context window
+        return results[:top_k + 2]  # Limit context window load
 
-    def get_training_corpus(self):
+    # --- LLM UTILITIES ---
+
+    def get_training_corpus(self) -> List[str]:
+        """Returns all memory nodes formatted for LLM training."""
         corpus = []
         for name, node in self.nodes.items():
             try:
@@ -254,51 +259,18 @@ class Organelle_Hippocampus:
                 pass
         return corpus
 
-    # --- PROMPTS ---
-
-    def format_memories_for_context(self, memory_nodes):
+    def format_context_block(self, memory_nodes: List[Tuple[float, Any]]) -> str:
+        """Formats search results into a system prompt string."""
         if not memory_nodes: return ""
-        out = "### RELEVANT LONG-TERM MEMORIES (SEMANTIC GRAPH) ###\n"
+
+        out = "### RELEVANT LONG-TERM MEMORIES ###\n"
         for _, node in memory_nodes:
             d = node.data
             out += f"ENTITY: {node.entity} ({node.type})\n"
             out += f"  SUMMARY: {d.get('core_summary', '')}\n"
 
-            # Show relations to prove associativity works
             rels = d.get('relations', [])
-            if rels: out += f"  LINKS: {'; '.join(rels[:4])}\n"
+            if rels:
+                out += f"  LINKS: {'; '.join(rels[:3])}\n"
             out += "\n"
         return out
-
-    def get_extraction_prompt(self, text):
-        return f"""
-Analyze the text and extract the MAIN Entity into the Knowledge Graph format.
-Be concise.
-
-TEMPLATE:
-entity: [Name]
-type: [Person/Location/Concept]
-core_summary: [1-sentence definition]
-relations:
-  - [Relation] -> [TargetEntity]
-timeline:
-  - [Date]: [Event]
-confidence: high
-
-TEXT:
-{text[:2500]}
-"""
-
-    def get_merge_prompt(self, existing, new_info):
-        return f"""
-Merge the New Info into the Existing Node.
-CRITICAL: If New Info contradicts Existing, verify context. Prioritize recent data but flag low confidence.
-
-EXISTING:
-{json.dumps(existing, indent=2)}
-
-NEW INFO:
-{new_info[:2000]}
-
-OUTPUT ONLY UPDATED YAML.
-"""
