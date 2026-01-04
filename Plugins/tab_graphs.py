@@ -68,7 +68,7 @@ class Plugin:
         ax.grid(True, color='#222222', linestyle='--')
 
     def _update(self, frame):
-        # Only update if tab is visible (simple heuristic) or data changed
+        # Only update if data exists
         if not self.app.graph_data: return
 
         # --- OPTIMIZATION: SLICE DATA (Last 50 points only) ---
@@ -77,12 +77,19 @@ class Plugin:
         epochs = sorted(self.app.graph_data.keys())
         recent_epochs = epochs[-limit:] # Take last N
         
+        if not recent_epochs: return
+
         # Extract data slices
         # We calculate the mean of each epoch's list to get a single scalar per epoch
         def get_means(key):
-            return [sum(self.app.graph_data[e][key]) / len(self.app.graph_data[e][key]) 
-                    if self.app.graph_data[e][key] else 0 
-                    for e in recent_epochs]
+            res = []
+            for e in recent_epochs:
+                data_list = self.app.graph_data[e].get(key, [])
+                if data_list:
+                    res.append(sum(data_list) / len(data_list))
+                else:
+                    res.append(0)
+            return res
 
         y_total = get_means('total')
         y_text = get_means('text')
@@ -91,8 +98,8 @@ class Plugin:
         # Clear and Redraw
         self.ax1.clear()
         self.ax2.clear()
-        self._style_ax(self.ax1, "Total Loss (Recent)")
-        self._style_ax(self.ax2, "Component Loss (Recent)")
+        self._style_ax(self.ax1, f"Total Loss (Last {limit} Epochs)")
+        self._style_ax(self.ax2, f"Component Loss (Last {limit} Epochs)")
 
         c = self.style_cfg
         
@@ -107,9 +114,13 @@ class Plugin:
         self.ax1.legend(facecolor=c['bg'], labelcolor=c['fg'], fontsize=8)
         self.ax2.legend(facecolor=c['bg'], labelcolor=c['fg'], fontsize=8)
 
-        # Force Tk refresh
-        # self.canvas.draw() # FuncAnimation handles this
+        
+
+    def _update_graphs(self):
+       
+        self._update(None)
+        self.canvas.draw()
 
     def on_theme_change(self):
-        # In future, could update colors dynamically
+        
         pass
