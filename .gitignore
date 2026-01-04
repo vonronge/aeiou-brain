@@ -2,6 +2,15 @@
 __pycache__/
 *.py[codz]
 *$py.class
+*.json
+!settings.json        # Keep defaults if you want
+!config.json
+diffusion_history.json
+trainer_state.json
+git rm --cached diffusion_history.json   # If committed
+git rm --cached -r lobes/                # Remove models from tracking
+git rm --cached -r memories/             # Remove personal graph
+git rm --cached codebase.txt             # Conversation dump
 
 # C extensions
 *.so
