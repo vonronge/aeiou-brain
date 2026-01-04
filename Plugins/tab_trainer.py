@@ -63,7 +63,10 @@ class Plugin:
         self.all_scanned_packets = []
         self.train_ext_vars = {}
         self.train_type_vars = {}
+
+        # Pipelines
         self.data_queue = queue.Queue(maxsize=5)
+        self.update_queue = queue.Queue()  # GUI Update Queue
 
         self.state_file = os.path.join(self.app.paths["root"], "trainer_state.json")
         self.history_file = os.path.join(self.app.paths["root"], "trainer_history.json")
@@ -76,7 +79,10 @@ class Plugin:
         elif self.recent_folders:
             default_folder = self.recent_folders[0]
 
-        # --- INITIALIZE VARIABLES (GUI vs HEADLESS) ---
+        # --- LOGGING CONFIG ---
+        self.max_log_lines = 1000
+
+        # --- INITIALIZE VARIABLES ---
         if self.parent is None:
             # Headless Mode
             self.folder_path = MockVar(default_folder)
@@ -120,10 +126,16 @@ class Plugin:
 
         self._setup_ui()
         if self.parent:
+            self.parent.after(100, self._process_gui_queue)
             self.parent.after(1000, self._load_session_state)
 
     def _setup_ui(self):
         if self.parent is None: return
+
+        # FIX: SCALE FONTS
+        scale = getattr(self.app, 'ui_scale', 1.0)
+        small_font = ("Segoe UI", int(9 * scale))
+        bold_font = ("Segoe UI", int(9 * scale), "bold")
 
         style = ttk.Style()
         style.map('TCombobox', fieldbackground=[('readonly', self.app.colors['BG_CARD'])],
@@ -193,10 +205,12 @@ class Plugin:
 
         grid = ttk.Frame(fr_nurse)
         grid.pack(fill="x", pady=5)
-        ttk.Label(grid, text="Channel", font=("Segoe UI", 8, "bold")).grid(row=0, column=0, padx=5)
-        ttk.Label(grid, text="Active", font=("Segoe UI", 8)).grid(row=0, column=1, padx=2)
-        ttk.Label(grid, text="Min Loss", font=("Segoe UI", 8)).grid(row=0, column=2, padx=2)
-        ttk.Label(grid, text="Max Loss", font=("Segoe UI", 8)).grid(row=0, column=3, padx=2)
+
+        # FIX: Scaled Font for Grid Headers
+        ttk.Label(grid, text="Channel", font=bold_font).grid(row=0, column=0, padx=5)
+        ttk.Label(grid, text="Active", font=small_font).grid(row=0, column=1, padx=2)
+        ttk.Label(grid, text="Min Loss", font=small_font).grid(row=0, column=2, padx=2)
+        ttk.Label(grid, text="Max Loss", font=small_font).grid(row=0, column=3, padx=2)
 
         def add_row(r, label, vars):
             ttk.Label(grid, text=label).grid(row=r, column=0, sticky="e", padx=5)
@@ -212,11 +226,13 @@ class Plugin:
         fr_log = ttk.LabelFrame(left, text="Neural Logs", padding=10)
         fr_log.pack(fill="both", expand=True, pady=5)
 
-        log_head = ttk.Frame(fr_log)
-        log_head.pack(fill="x")
-        ttk.Checkbutton(log_head, text="Autoscroll", variable=self.auto_scroll).pack(side="right")
+        # TOOLBAR
+        tool_fr = ttk.Frame(fr_log)
+        tool_fr.pack(fill="x")
+        ttk.Checkbutton(tool_fr, text="Autoscroll", variable=self.auto_scroll).pack(side="left")
+        ttk.Button(tool_fr, text="Clear Log", command=self._clear_log, width=10).pack(side="right", padx=5)
 
-        self.log_box = tk.Text(fr_log, font=("Consolas", 9), height=10, bg=self.app.colors["BG_MAIN"],
+        self.log_box = tk.Text(fr_log, font=("Consolas", int(9 * scale)), height=10, bg=self.app.colors["BG_MAIN"],
                                fg=self.app.colors["FG_TEXT"], borderwidth=0)
         self.log_box.pack(side="left", fill="both", expand=True)
 
@@ -230,7 +246,7 @@ class Plugin:
         self.log_box.tag_config("success", foreground=self.app.colors["SUCCESS"])
         self.log_box.tag_config("prog", foreground=self.app.colors["FG_DIM"])
         self.log_box.tag_config("scale", foreground="#FDD663")
-        self.log_box.tag_config("save", foreground="#81C995", font=("Consolas", 9, "bold"))
+        self.log_box.tag_config("save", foreground="#81C995", font=("Consolas", int(9 * scale), "bold"))
 
         # --- CENSUS ---
         fr_census = ttk.LabelFrame(right, text="Census", padding=10)
@@ -245,6 +261,56 @@ class Plugin:
 
         self.canvas.pack(side="left", fill="both", expand=True)
         scr.pack(side="right", fill="y")
+
+    # --- QUEUE & LOG MANAGEMENT ---
+    def _process_gui_queue(self):
+        """Polls the queue and executes GUI updates in the main thread"""
+        while not self.update_queue.empty():
+            try:
+                func = self.update_queue.get_nowait()
+                func()
+            except queue.Empty:
+                break
+            except Exception:
+                pass
+
+        # Schedule next poll
+        if self.parent:
+            self.parent.after(100, self._process_gui_queue)
+
+    def _log(self, msg, tag="info"):
+        if self.parent is None:
+            # Headless logging
+            print(f"[{tag.upper()}] {msg}")
+        else:
+            # Enqueue the GUI update
+            self.update_queue.put(lambda: self._internal_log_update(msg, tag))
+
+    def _internal_log_update(self, msg, tag):
+        """The actual Tkinter update, run by _process_gui_queue"""
+        if not hasattr(self, 'log_box'): return
+
+        ts = datetime.now().strftime('%H:%M:%S')
+        full = f"[{ts}] {msg}\n"
+        self.log_box.insert(tk.END, full, tag)
+
+        if self.auto_scroll.get():
+            self.log_box.see(tk.END)
+
+        self._trim_log()
+
+    def _trim_log(self):
+        try:
+            # Check line count
+            count = int(self.log_box.index('end-1c').split('.')[0])
+            if count > self.max_log_lines + 50:  # +buffer
+                self.log_box.delete("1.0", f"{count - self.max_log_lines}.0")
+        except:
+            pass
+
+    def _clear_log(self):
+        self.log_box.delete("1.0", tk.END)
+        self._log("Log cleared.", "info")
 
     def _load_json(self, path, default):
         if os.path.exists(path):
@@ -332,31 +398,6 @@ class Plugin:
     def _browse_folder(self):
         d = filedialog.askdirectory()
         if d: self.folder_path.set(d); self._save_history(); self._scan_files()
-
-    def _log(self, msg, tag="info"):
-        if self.parent is None:
-            # Headless logging
-            print(f"[{tag.upper()}] {msg}")
-        else:
-            # GUI logging with LAG PREVENTION
-            def _update():
-                if not hasattr(self, 'log_box'): return
-
-                # --- OPTIMIZATION: PRUNE LOGS ---
-                try:
-                    num_lines = int(self.log_box.index('end-1c').split('.')[0])
-                    if num_lines > 1000:
-                        self.log_box.delete("1.0", "100.0")
-                except:
-                    pass
-
-                self.log_box.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n", tag)
-                if self.auto_scroll.get(): self.log_box.see(tk.END)
-
-            try:
-                self.parent.after(0, _update)
-            except:
-                pass
 
     def _toggle_pause(self):
         self.is_paused = not self.is_paused
@@ -581,10 +622,8 @@ class Plugin:
                 packet, (v, a, t, c, _) = item
                 if t is None or t.size(1) < 2: continue
 
-                if self.parent:
-                    self.parent.update_idletasks()
-                while self.is_paused: time.sleep(0.1);
-                if self.parent: self.parent.update()
+                # No manual sleep needed for GUI updates now - Queue handles it
+                while self.is_paused: time.sleep(0.1)
 
                 input_t = t[:, :-1]
                 labels = t[:, 1:]
@@ -701,40 +740,42 @@ class Plugin:
                         # Only update GUI log if parent exists, else print
                         msg = f"[SAVE] Auto-saved at step {self.processed_count}"
                         if self.parent:
-                            self.parent.after(0, lambda: self._log(msg, "save"))
+                            self._log(msg, "save")
                         else:
                             print(msg)
                     except:
                         pass
 
-                if self.processed_count % 10 == 0:
+                # REDUCED LOG FREQUENCY
+                if self.processed_count % 50 == 0:
                     pct = int((self.processed_count / self.total_items) * 100) if self.total_items > 0 else 0
                     name = os.path.basename(packet.get('t', 'Unknown'))
                     game_stat = f" | Game:{graph_b:.2f}" if has_game else ""
                     msg = f"[{self.processed_count}] ({pct}%) {name} | Tot:{val:.2f} | Pred:{graph_pred:.2f}{game_stat}"
                     if self.parent:
-                        self.parent.after(0, lambda m=msg: self._log(m, "prog"))
+                        self._log(msg, "prog")
                     else:
                         print(msg)
 
             if self.parent:
-                self.parent.after(0, lambda: self._log("Training Complete.", "success"))
+                self._log("Training Complete.", "success")
             else:
                 print("Training Complete.")
             self._save_session_state()
 
         except Exception as e:
             if self.parent:
-                self.parent.after(0, lambda m=f"CRASH: {e}": self._log(m, "error"))
+                self._log(f"CRASH: {e}", "error")
             else:
                 print(f"CRASH: {e}")
             import traceback;
             traceback.print_exc()
         finally:
             self.is_training = False
+            # Safe Queue Update for Buttons
             if self.parent:
-                self.parent.after(0, lambda: self.btn_start.config(text="START TRAINING"))
-                self.parent.after(0, lambda: self.btn_pause.config(state="disabled"))
+                self.update_queue.put(lambda: self.btn_start.config(text="START TRAINING"))
+                self.update_queue.put(lambda: self.btn_pause.config(state="disabled"))
 
     def on_theme_change(self):
         c = self.app.colors

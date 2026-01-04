@@ -61,6 +61,7 @@ class Plugin:
         # PIPELINE
         self.data_queue = queue.Queue(maxsize=50)
         self.task_queue = queue.Queue(maxsize=100)
+        self.update_queue = queue.Queue()  # GUI Update Queue
         self.ram_cache = {}
         self.MAX_CACHE_SIZE = 25000
 
@@ -73,13 +74,15 @@ class Plugin:
         self.recent_folders = self._load_json(self.history_file, [])
         default_folder = self.recent_folders[0] if self.recent_folders else "D:/Training_Data"
 
-        # Telepathy/Config override
         if hasattr(self.app.paths, "data") and os.path.exists(self.app.paths["data"]):
             default_folder = self.app.paths["data"]
 
         self.processed_count = 0
         self.total_items = 0
         self.loss_history = {'recon': deque(maxlen=10000), 'game': deque(maxlen=10000)}
+
+        # LOGGING LIMIT
+        self.max_log_lines = 1000
 
         # --- INITIALIZE VARIABLES (GUI vs HEADLESS) ---
         if self.parent is None:
@@ -120,9 +123,16 @@ class Plugin:
             self.num_workers = tk.IntVar(value=4)
 
         self._setup_ui()
+        if self.parent:
+            self.parent.after(100, self._process_gui_queue)
 
     def _setup_ui(self):
         if self.parent is None: return
+
+        # FIX: SCALED FONTS
+        scale = getattr(self.app, 'ui_scale', 1.0)
+        small_font = ("Segoe UI", int(9 * scale))
+        bold_font = ("Segoe UI", int(9 * scale), "bold")
 
         style = ttk.Style()
         style.map('TCombobox', fieldbackground=[('readonly', self.app.colors['BG_CARD'])],
@@ -185,10 +195,12 @@ class Plugin:
 
         grid = ttk.Frame(fr_nurse)
         grid.pack(fill="x", pady=5)
-        ttk.Label(grid, text="Channel", font=("Segoe UI", 8, "bold")).grid(row=0, column=0, sticky="w")
-        ttk.Label(grid, text="Active", font=("Segoe UI", 8)).grid(row=0, column=1)
-        ttk.Label(grid, text="Min", font=("Segoe UI", 8)).grid(row=0, column=2)
-        ttk.Label(grid, text="Max", font=("Segoe UI", 8)).grid(row=0, column=3)
+
+        # FIX: Scaled Fonts
+        ttk.Label(grid, text="Channel", font=bold_font).grid(row=0, column=0, sticky="w")
+        ttk.Label(grid, text="Active", font=small_font).grid(row=0, column=1)
+        ttk.Label(grid, text="Min", font=small_font).grid(row=0, column=2)
+        ttk.Label(grid, text="Max", font=small_font).grid(row=0, column=3)
 
         def add_row(r, label, vars):
             ttk.Label(grid, text=label).grid(row=r, column=0, sticky="e", padx=5)
@@ -222,7 +234,14 @@ class Plugin:
         # 5. LOGS
         fr_log = ttk.LabelFrame(left, text="Logs", padding=10)
         fr_log.pack(fill="both", expand=True, pady=5)
-        self.log_box = tk.Text(fr_log, font=("Consolas", 9), bg=self.app.colors["BG_MAIN"],
+
+        # Toolbar
+        tool_fr = ttk.Frame(fr_log)
+        tool_fr.pack(fill="x")
+        ttk.Checkbutton(tool_fr, text="Autoscroll", variable=self.auto_scroll).pack(side="left")
+        ttk.Button(tool_fr, text="Clear Log", command=self._clear_log, width=10).pack(side="right", padx=5)
+
+        self.log_box = tk.Text(fr_log, font=("Consolas", int(9 * scale)), bg=self.app.colors["BG_MAIN"],
                                fg=self.app.colors["FG_TEXT"])
         self.log_box.pack(fill="both", expand=True, side="left")
         sb = ttk.Scrollbar(fr_log, command=self.log_box.yview)
@@ -231,7 +250,8 @@ class Plugin:
 
         self.log_box.tag_config("info", foreground=self.app.colors["ACCENT"])
         self.log_box.tag_config("prog", foreground=self.app.colors["FG_DIM"])
-        self.log_box.tag_config("save", foreground=self.app.colors["SUCCESS"], font=("Consolas", 9, "bold"))
+        self.log_box.tag_config("save", foreground=self.app.colors["SUCCESS"],
+                                font=("Consolas", int(9 * scale), "bold"))
         self.log_box.tag_config("warn", foreground=self.app.colors["WARN"])
         self.log_box.tag_config("error", foreground=self.app.colors["ERROR"])
 
@@ -246,6 +266,35 @@ class Plugin:
         self.canvas.configure(yscrollcommand=scr.set)
         self.canvas.pack(side="left", fill="both", expand=True)
         scr.pack(side="right", fill="y")
+
+    # --- LOGGING MANAGEMENT ---
+    def _log_threadsafe(self, msg, tag="info"):
+        if self.parent is None:
+            # Headless logging
+            print(f"[{tag.upper()}] {msg}")
+        else:
+            # GUI logging with Auto-Trim
+            def _update():
+                if not hasattr(self, 'log_box'): return
+                ts = datetime.now().strftime('%H:%M:%S')
+                full = f"[{ts}] {msg}\n"
+                self.log_box.insert(tk.END, full, tag)
+                if self.auto_scroll.get(): self.log_box.see(tk.END)
+                self._trim_log()
+
+            self.parent.after(0, _update)
+
+    def _trim_log(self):
+        try:
+            count = int(self.log_box.index('end-1c').split('.')[0])
+            if count > self.max_log_lines + 50:
+                self.log_box.delete("1.0", f"{count - self.max_log_lines}.0")
+        except:
+            pass
+
+    def _clear_log(self):
+        self.log_box.delete("1.0", tk.END)
+        self._log_threadsafe("Log cleared.", "info")
 
     def _load_json(self, path, default):
         if os.path.exists(path):
@@ -263,31 +312,6 @@ class Plugin:
             json.dump(self.recent_folders[:10], open(self.history_file, 'w'))
         except:
             pass
-
-    def _log_threadsafe(self, msg, tag="info"):
-        if self.parent is None:
-            # Headless logging
-            print(f"[{tag.upper()}] {msg}")
-        else:
-            # GUI logging with LAG PREVENTION
-            def _update():
-                if not hasattr(self, 'log_box'): return
-
-                # --- OPTIMIZATION: PRUNE LOGS ---
-                try:
-                    num_lines = int(self.log_box.index('end-1c').split('.')[0])
-                    if num_lines > 1000:
-                        self.log_box.delete("1.0", "100.0")
-                except:
-                    pass
-
-                self.log_box.insert(tk.END, f"[{datetime.now().strftime('%H:%M:%S')}] {msg}\n", tag)
-                if self.auto_scroll.get(): self.log_box.see(tk.END)
-
-            try:
-                self.parent.after(0, _update)
-            except:
-                pass
 
     def _toggle_pause(self):
         self.is_paused = not self.is_paused
@@ -689,7 +713,8 @@ class Plugin:
                 self.app.graph_data[current_epoch]['raw_vis'].append(raw_game)
                 self.app.graph_data[current_epoch]['raw_aud'].append(0)
 
-                if self.processed_count % 10 == 0:
+                # LOGGING OPTIMIZATION: Reduced freq from 10 to 50
+                if self.processed_count % 50 == 0:
                     pct = int((self.processed_count / self.total_items) * 100) if self.total_items else 0
                     game_str = f" | Game:{raw_game:.2f}" if has_game else ""
                     name = "Unknown"
@@ -721,9 +746,10 @@ class Plugin:
             traceback.print_exc()
         finally:
             self.is_training = False
+            # Safe Queue Update for Buttons
             if self.parent:
-                self.btn_start.config(text="START DIFFUSION TRAINING")
-                self.btn_pause.config(state="disabled")
+                self.update_queue.put(lambda: self.btn_start.config(text="START DIFFUSION TRAINING"))
+                self.update_queue.put(lambda: self.btn_pause.config(state="disabled"))
 
     def on_theme_change(self):
         c = self.app.colors

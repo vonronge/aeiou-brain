@@ -41,7 +41,6 @@
   "sidebar_order": [
     "tab_cortex",
     "tab_trainer",
-    "tab_diffusion_trainer",
     "tab_playground",
     "tab_rlm",
     "tab_dream",
@@ -52,7 +51,14 @@
     "tab_factory",
     "tab_video_factory",
     "tab_comic",
-    "tab_settings",
-    "tab_graphs"
-  ]
+    "tab_graphs",
+    "tab_pdf_repair",
+    "tab_settings"
+  ],
+  "ui_scale": 1.65,
+  "data_dir": "D:\\AEIOU_Brain\\Training_Data",
+  "chaos_dir": "D:\\AEIOU_Brain\\Training_Data\\Chaos_Buffer",
+  "output_dir": "D:\\AEIOU_Brain\\Training_Data\\Comics_Output",
+  "window_geometry": "3840x2019+70+-33",
+  "window_state": "zoomed"
 }

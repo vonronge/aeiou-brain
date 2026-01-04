@@ -17,7 +17,7 @@ import tkinter as tk
 from tkinter import ttk, messagebox, filedialog, colorchooser
 import json
 import os
-import sys  # <--- Added missing import
+import sys
 
 
 class Plugin:
@@ -83,7 +83,8 @@ class Plugin:
         scl_row = ttk.Frame(fr_disp)
         scl_row.pack(fill="x", pady=5)
 
-        scl = ttk.Scale(scl_row, from_=0.8, to=3.0, variable=self.scale_var, orient="horizontal")
+        # INCREASED RANGE TO 4.0
+        scl = ttk.Scale(scl_row, from_=0.8, to=4.0, variable=self.scale_var, orient="horizontal")
         scl.pack(side="left", fill="x", expand=True)
 
         lbl_scl = ttk.Label(scl_row, text=f"{self.scale_var.get():.1f}x", width=5)

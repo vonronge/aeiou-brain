@@ -19,7 +19,7 @@ import torch
 import torch.nn as nn
 from torchvision.models import vit_b_16, ViT_B_16_Weights
 import tiktoken
-from PIL import Image, ImageDraw, ImageFont
+from PIL import Image, ImageDraw, ImageFont, UnidentifiedImageError, ImageFile
 import warnings
 import os
 import io
@@ -33,6 +33,9 @@ import librosa
 import torchaudio
 import numpy as np
 from .thalamus import Organelle_Thalamus
+
+# --- CRITICAL FIX FOR CORRUPT JPEGS ---
+ImageFile.LOAD_TRUNCATED_IMAGES = True
 
 # --- CODEC IMPORTS ---
 try:
@@ -80,7 +83,7 @@ class Organelle_Ribosome:
         self.device = device
         self.config = RibosomeConfig()  # Load Default Config
 
-        print(f" > Ribosome v23.2 (Dynamic Resolution) initializing on {device}...")
+        print(f" > Ribosome v23.3 (Robust Ingestion) initializing on {device}...")
 
         # Visual Cortex (feature extractor)
         weights = ViT_B_16_Weights.DEFAULT
@@ -105,6 +108,7 @@ class Organelle_Ribosome:
         self.text_vocab_base = 50257
         self.image_vocab_size = 16384
         self.image_vocab_base = self.text_vocab_base
+        self.image_vocab_size = 16384
         self.audio_vocab_size = 8192
         self.audio_vocab_base = self.text_vocab_base + self.image_vocab_size
 
@@ -275,11 +279,16 @@ class Organelle_Ribosome:
             toks = self._tokenize(content)
             t = torch.tensor(toks).unsqueeze(0).to(self.device)
 
-        # IMAGE HANDLING
+        # IMAGE HANDLING (ROBUST)
         if 'v' in packet and packet['v'] and self.magvit:
             try:
-                img = Image.open(packet['v']).convert('RGB').resize((self.config.image_size, self.config.image_size))
+                # 1. Safe Load
+                img = Image.open(packet['v']).convert('RGB')
 
+                # 2. Resize
+                img = img.resize((self.config.image_size, self.config.image_size))
+
+                # 3. Process
                 # 3D MagViT expects [B, C, T, H, W]. For image, T=1.
                 tens = torch.tensor(np.array(img)).permute(2, 0, 1).float().div(127.5).sub(1).unsqueeze(0).unsqueeze(
                     2).to(self.device)
@@ -305,8 +314,11 @@ class Organelle_Ribosome:
                     px = self.visual_transform(img).unsqueeze(0).to(self.device)
                     full_vis = self.retina(px)
                     v, kept_idx = self.thalamus(full_vis)
-            except:
-                pass
+
+            except (UnidentifiedImageError, OSError, Exception) as e:
+                # Log bad image but do not crash
+                print(f"[Ribosome] Skipped corrupt image {packet['v']}: {e}")
+                if t is None: t = torch.tensor([[50256]]).to(self.device)  # Ensure tensor exists
 
         # VIDEO HANDLING (CHRONOS)
         if 'vid' in packet and packet['vid'] and self.magvit and HAS_OPENCV:

@@ -69,13 +69,18 @@ class Plugin:
             self.combo['values'] = list(self.available_genetics.keys())
 
     def _setup_ui(self):
+        # SCALE CALCULATION
+        scale = getattr(self.app, 'ui_scale', 1.0)
+        font_size = int(10 * scale)
+
         frame_status = ttk.LabelFrame(self.parent, text="Cortex Status", padding=15)
         frame_status.pack(fill="x", padx=20, pady=10)
 
         for i in range(1, 5):
             row = ttk.Frame(frame_status)
             row.pack(fill="x", pady=2)
-            lbl = ttk.Label(row, text=f"Lobe {i}: Checking...", font=("Segoe UI", 10))
+            # FIX: Dynamic Font Size
+            lbl = ttk.Label(row, text=f"Lobe {i}: Checking...", font=("Segoe UI", font_size))
             lbl.pack(side="left")
             self.status_labels[i] = lbl
 
@@ -119,6 +124,11 @@ class Plugin:
             self.info_text.set(f"{info.get('desc', '')}\nEst. VRAM: {info.get('vram_train', '?')}")
 
     def _refresh_ui(self):
+        # FIX: Re-calculate scale for updates
+        scale = getattr(self.app, 'ui_scale', 1.0)
+        font_norm = ("Segoe UI", int(10 * scale))
+        font_bold = ("Segoe UI", int(10 * scale), "bold")
+
         for i in range(1, 5):
             brain = self.app.lobes[i]
             lbl = self.status_labels[i]
@@ -128,11 +138,12 @@ class Plugin:
                 is_active = (self.app.active_lobe.get() == i)
                 prefix = "➤ " if is_active else "   "
                 color = self.app.colors["SUCCESS"] if is_active else self.app.colors["FG_TEXT"]
-                font = ("Segoe UI", 10, "bold") if is_active else ("Segoe UI", 10)
+                f_style = font_bold if is_active else font_norm
+
                 opt_name = "AdamW"
                 if hasattr(self.app.optimizers[i], 'adamw'): opt_name = "Muon"
                 lbl.config(text=f"{prefix}Lobe {i}: ONLINE ({g_name} | {m_type}) [{opt_name}]", foreground=color,
-                           font=font)
+                           font=f_style)
             else:
                 path = os.path.join(self.app.paths['lobes'], f"brain_lobe_{i}.pt")
                 prefix = "➤ " if (self.app.active_lobe.get() == i) else "   "
@@ -141,13 +152,13 @@ class Plugin:
                         meta = torch.load(path, map_location="cpu")
                         g_name = meta.get("genome", "GPT2") if isinstance(meta, dict) else "GPT2"
                         lbl.config(text=f"{prefix}Lobe {i}: OFFLINE (Ready: {g_name})",
-                                   foreground=self.app.colors["WARN"], font=("Segoe UI", 10))
+                                   foreground=self.app.colors["WARN"], font=font_norm)
                     except:
                         lbl.config(text=f"{prefix}Lobe {i}: OFFLINE (Corrupt File)",
-                                   foreground=self.app.colors["ERROR"], font=("Segoe UI", 10))
+                                   foreground=self.app.colors["ERROR"], font=font_norm)
                 else:
                     lbl.config(text=f"{prefix}Lobe {i}: EMPTY", foreground=self.app.colors["FG_DIM"],
-                               font=("Segoe UI", 10))
+                               font=font_norm)
 
     def on_theme_change(self):
         self._refresh_ui()
