@@ -22,7 +22,7 @@ import torch
 import importlib.util
 import traceback
 import threading
-import time  # Added for shutdown timer
+import time
 
 # --- PATH SETUP ---
 current_dir = os.path.dirname(os.path.abspath(__file__))
@@ -104,7 +104,7 @@ class BrainApp(tk.Tk):
                 pass
 
         super().__init__()
-        self.title("AEIOU Brain - The Unified Cortex (v24.10 Debug Shutdown)")
+        self.title("AEIOU Brain - The Unified Cortex (v24.11 Smart Window)")
 
         if os.name == 'nt':
             try:
@@ -156,15 +156,28 @@ class BrainApp(tk.Tk):
         }
 
         self.ui_scale = 1.3
-        self._load_config()
+        self._load_config()  # Loads colors, scale, and window geometry
         self._ensure_paths()
 
         self.configure(bg=self.colors["BG_MAIN"])
 
-        w, h = 1600, 900
-        x = (self.winfo_screenwidth() - w) // 2
-        y = 50
-        self.geometry(f'{w}x{h}+{int(x)}+{int(y)}')
+        # --- WINDOW GEOMETRY RESTORE ---
+        # If geometry was loaded from config, apply it. Otherwise use default.
+        if hasattr(self, 'saved_geometry') and self.saved_geometry:
+            self.geometry(self.saved_geometry)
+        else:
+            w, h = 1600, 900
+            x = (self.winfo_screenwidth() - w) // 2
+            y = 50
+            self.geometry(f'{w}x{h}+{int(x)}+{int(y)}')
+
+        # Restore Maximized state if applicable
+        if hasattr(self, 'saved_state') and self.saved_state == 'zoomed':
+            try:
+                self.state('zoomed')
+            except:
+                pass
+
         self.protocol("WM_DELETE_WINDOW", self._on_close)
 
         try:
@@ -187,12 +200,19 @@ class BrainApp(tk.Tk):
                     pass
 
     def _load_config(self):
+        self.saved_geometry = None
+        self.saved_state = None
+
         if os.path.exists(CONFIG_FILE):
             try:
                 with open(CONFIG_FILE, 'r') as f:
                     data = json.load(f)
                     self.colors.update(data.get("colors", {}))
                     self.ui_scale = data.get("ui_scale", 1.3)
+
+                    # Load Window Settings
+                    self.saved_geometry = data.get("window_geometry")
+                    self.saved_state = data.get("window_state")
 
                     custom_data = data.get("data_dir")
                     if custom_data:
@@ -225,17 +245,19 @@ class BrainApp(tk.Tk):
         self.main_split = tk.Frame(self, bg=self.colors["BG_MAIN"])
         self.main_split.pack(fill="both", expand=True)
 
+        # Sidebar with Scrollbar
         self.sidebar_container = tk.Frame(self.main_split, bg=self.colors["BG_CARD"], width=260)
         self.sidebar_container.pack(side="left", fill="y")
         self.sidebar_container.pack_propagate(False)
 
-        self.sb_scroll = ttk.Scrollbar(self.sidebar_container, orient="vertical")
-        self.sb_scroll.pack(side="right", fill="y")
+        # Scrollbar Logic
+        self.sb_canvas = tk.Canvas(self.sidebar_container, bg=self.colors["BG_CARD"], highlightthickness=0)
+        self.sb_scroll = ttk.Scrollbar(self.sidebar_container, orient="vertical", command=self.sb_canvas.yview)
 
-        self.sb_canvas = tk.Canvas(self.sidebar_container, bg=self.colors["BG_CARD"],
-                                   highlightthickness=0, yscrollcommand=self.sb_scroll.set)
+        self.sb_scroll.pack(side="right", fill="y")
         self.sb_canvas.pack(side="left", fill="both", expand=True)
-        self.sb_scroll.config(command=self.sb_canvas.yview)
+
+        self.sb_canvas.configure(yscrollcommand=self.sb_scroll.set)
 
         self.sidebar_frame = tk.Frame(self.sb_canvas, bg=self.colors["BG_CARD"])
         self.sb_window = self.sb_canvas.create_window((0, 0), window=self.sidebar_frame, anchor="nw")
@@ -264,14 +286,17 @@ class BrainApp(tk.Tk):
         self.plugin_container.grid_columnconfigure(0, weight=1)
 
     def _on_sb_configure(self, event):
+        # Update scrollregion to match content height
         self.sb_canvas.configure(scrollregion=self.sb_canvas.bbox("all"))
 
     def _on_sb_canvas_configure(self, event):
+        # Ensure inner frame matches canvas width
         self.sb_canvas.itemconfig(self.sb_window, width=event.width)
 
     def _on_mousewheel(self, event):
         x, y = self.winfo_pointerxy()
         widget = self.winfo_containing(x, y)
+        # Only scroll if hovering over sidebar
         if str(widget).startswith(str(self.sidebar_container)):
             if sys.platform == 'darwin':
                 self.sb_canvas.yview_scroll(int(-1 * event.delta), "units")
@@ -430,7 +455,13 @@ class BrainApp(tk.Tk):
                     data = json.load(f)
             except:
                 pass
+
         data["last_active_lobe"] = self.active_lobe.get()
+
+        # --- SAVE WINDOW METRICS ---
+        data["window_geometry"] = self.geometry()
+        data["window_state"] = self.state()
+
         try:
             with open(CONFIG_FILE, 'w') as f:
                 json.dump(data, f, indent=2)
@@ -476,17 +507,14 @@ class BrainApp(tk.Tk):
             pass
 
         # 3. GRACEFUL WAIT (10s)
-        self.destroy()  # Close UI first
+        self.destroy()
 
         deadline = time.time() + 10
         while time.time() < deadline:
-            # Filter for non-daemon threads (daemons die with main)
             active = [t for t in threading.enumerate() if t is not threading.current_thread() and not t.daemon]
-
             if not active:
                 print("[SYS] All threads closed gracefully.")
                 break
-
             print(f"[SYS] Waiting for {len(active)} threads to stop... ({int(deadline - time.time())}s remaining)")
             time.sleep(1)
 
