@@ -9,6 +9,7 @@ Central authority for loading, saving, and managing neural lobes.
 Abstracts away file I/O, dynamic imports, and hardware configuration.
 """
 
+
 import os
 import torch
 import torch.nn as nn
@@ -19,7 +20,6 @@ from typing import Optional, Any, Dict
 from torch.cuda.amp import GradScaler
 
 
-# Define custom exceptions for cleaner error handling
 class LobeNotFoundError(Exception): pass
 
 
@@ -31,23 +31,17 @@ class CorruptLobeError(Exception): pass
 
 @dataclass
 class LobeHandle:
-    """
-    A lightweight handle representing a loaded active lobe.
-    Passed around to plugins so they don't need to know about files or imports.
-    """
     id: int
     genome: str
-    model_type: str  # "ar", "diffusion", etc.
+    model_type: str
     model: nn.Module
     optimizer: Optional[optim.Optimizer]
     scaler: Optional[GradScaler]
     device: str
 
-    def train(self):
-        self.model.train()
+    def train(self): self.model.train()
 
-    def eval(self):
-        self.model.eval()
+    def eval(self): self.model.eval()
 
 
 class Organelle_LobeManager:
@@ -57,19 +51,46 @@ class Organelle_LobeManager:
         self.device = device
         self.ribosome = ribosome
 
-        # Internal cache of loaded lobes: {int_id: LobeHandle}
         self._active_lobes: Dict[int, LobeHandle] = {}
 
+        # [NEW] Registry: Maps "Display Name" -> "filename.py"
+        self._genetics_registry: Dict[str, str] = {}
+        self.refresh_registry()
+
+    def refresh_registry(self):
+        """Scans Genetics folder and builds the name map."""
+        self._genetics_registry = {}
+        if not os.path.exists(self.genetics_dir): return
+
+        files = [f for f in os.listdir(self.genetics_dir) if f.endswith(".py") and not f.startswith("__")]
+
+        for f in files:
+            try:
+                # We import spec only to read INFO, not initialize the model
+                path = os.path.join(self.genetics_dir, f)
+                spec = importlib.util.spec_from_file_location("temp_dna_scan", path)
+                module = importlib.util.module_from_spec(spec)
+                spec.loader.exec_module(module)
+
+                if hasattr(module, "INFO"):
+                    # Map "MaskedDiffusion-mHC" -> "diffusion_mhc.py"
+                    name = module.INFO.get("name", f)
+                    self._genetics_registry[name] = f
+                else:
+                    # Fallback to filename
+                    self._genetics_registry[f] = f
+
+            except Exception as e:
+                print(f"[LobeManager] Skipping {f}: {e}")
+
+    def list_available_genetics(self):
+        """Returns list of display names for the GUI."""
+        return sorted(list(self._genetics_registry.keys()))
+
     def get_lobe(self, lobe_id: int) -> Optional[LobeHandle]:
-        """Returns the handle if loaded, else None."""
         return self._active_lobes.get(lobe_id)
 
-    def list_active_lobes(self) -> Dict[int, LobeHandle]:
-        """Returns a dict of all currently loaded lobes."""
-        return self._active_lobes
-
     def unload_lobe(self, lobe_id: int):
-        """Safely unloads a lobe and frees memory."""
         if lobe_id in self._active_lobes:
             del self._active_lobes[lobe_id]
             import gc
@@ -78,78 +99,54 @@ class Organelle_LobeManager:
             print(f"[LobeManager] Unloaded Lobe {lobe_id}")
 
     def load_lobe(self, lobe_id: int) -> LobeHandle:
-        """
-        The heavy lifter. Loads weights, resolves genetics, sets up optimizers.
-        Returns a ready-to-use LobeHandle.
-        """
-        # 1. Path Resolution
-        filename = f"brain_lobe_{lobe_id}.pt"
-        path = os.path.join(self.lobes_dir, filename)
-
+        path = os.path.join(self.lobes_dir, f"brain_lobe_{lobe_id}.pt")
         if not os.path.exists(path):
             raise LobeNotFoundError(f"Lobe file not found: {path}")
 
-        print(f"[LobeManager] Loading Lobe {lobe_id} from {filename}...")
-
-        # 2. Load Weights & Metadata
+        print(f"[LobeManager] Loading Lobe {lobe_id}...")
         try:
             checkpoint = torch.load(path, map_location=self.device)
         except Exception as e:
             raise CorruptLobeError(f"Failed to load checkpoint: {e}")
 
-        # Handle legacy or dict-based checkpoints
         if isinstance(checkpoint, dict):
             state_dict = checkpoint.get("state_dict", checkpoint)
-            genome_name = checkpoint.get("genome", "gpt2")  # Default fallback
+            genome_name = checkpoint.get("genome", "gpt2")
             model_type = checkpoint.get("model_type")
         else:
-            # Very old format (raw state dict)
             state_dict = checkpoint
             genome_name = "gpt2"
             model_type = "ar"
 
-        # Auto-detect model type if missing
         if model_type is None:
             model_type = "diffusion" if "diffusion" in genome_name.lower() else "ar"
 
-        # 3. Resolve & Import Genetics
+        # Import using the Registry
         module = self._import_genetics(genome_name)
 
-        # 4. Instantiate Model
         try:
             config = module.NucleusConfig()
             model = module.Model(config).to(self.device)
-
-            # Strict=False allows for architecture evolution (e.g. adding new layers)
             model.load_state_dict(state_dict, strict=False)
         except Exception as e:
             raise CorruptLobeError(f"Architecture mismatch for {genome_name}: {e}")
 
-        # 5. Setup Optimizer (Muon vs AdamW)
-        # We check the genome name or config for "Muon" preference
+        # Optimizer Setup
         optimizer = None
         if "Muon" in genome_name or getattr(config, 'use_muon', False):
             try:
                 from Genetics.muon import Muon
-                # Muon typically needs specific params, here we use safe defaults
                 optimizer = Muon(model.parameters(), lr=0.0005, momentum=0.95)
-                print(f"[LobeManager] Attached Muon Optimizer to Lobe {lobe_id}")
             except ImportError:
-                print("[LobeManager] Muon optimizer missing, falling back to AdamW.")
                 optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
         else:
             optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
 
-        # 6. Setup Scaler (AMP)
-        scaler = None
-        if self.device == "cuda":
-            scaler = GradScaler()
+        scaler = GradScaler() if self.device == "cuda" else None
 
-        # 7. Register Tokenizer (if Ribosome exists)
         if self.ribosome and hasattr(model, "tokenizer"):
             self.ribosome.set_tokenizer(model.tokenizer)
 
-        # 8. Create Handle & Cache
         handle = LobeHandle(
             id=lobe_id,
             genome=genome_name,
@@ -165,19 +162,15 @@ class Organelle_LobeManager:
         return handle
 
     def create_lobe(self, lobe_id: int, genome_name: str) -> LobeHandle:
-        """
-        Initializes a FRESH lobe from genetics (random weights).
-        """
         print(f"[LobeManager] Genesis: Creating Lobe {lobe_id} with {genome_name}...")
 
+        # Use Registry to resolve name -> file
         module = self._import_genetics(genome_name)
+
         config = module.NucleusConfig()
         model = module.Model(config).to(self.device)
-
-        # Determine Type
         model_type = "diffusion" if "diffusion" in genome_name.lower() else "ar"
 
-        # Setup Optimizer
         optimizer = None
         if "Muon" in genome_name:
             from Genetics.muon import Muon
@@ -198,62 +191,55 @@ class Organelle_LobeManager:
         )
 
         self._active_lobes[lobe_id] = handle
-        self.save_lobe(lobe_id)  # Initial save
+        self.save_lobe(lobe_id)
         return handle
 
     def save_lobe(self, lobe_id: int, custom_path: str = None) -> str:
-        """
-        Saves the lobe state to disk.
-        """
         handle = self._active_lobes.get(lobe_id)
-        if not handle:
-            raise LobeNotFoundError(f"Cannot save Lobe {lobe_id}: Not loaded.")
+        if not handle: raise LobeNotFoundError(f"Lobe {lobe_id} not loaded.")
 
-        if custom_path:
-            save_path = custom_path
-        else:
-            save_path = os.path.join(self.lobes_dir, f"brain_lobe_{lobe_id}.pt")
+        save_path = custom_path if custom_path else os.path.join(self.lobes_dir, f"brain_lobe_{lobe_id}.pt")
 
         payload = {
-            "genome": handle.genome,
+            "genome": handle.genome,  # Saves "MaskedDiffusion-mHC"
             "model_type": handle.model_type,
             "state_dict": handle.model.state_dict()
         }
 
-        # Atomic save (write temp then rename) to prevent corruption
         temp_path = save_path + ".tmp"
         torch.save(payload, temp_path)
-
-        if os.path.exists(save_path):
-            os.remove(save_path)
+        if os.path.exists(save_path): os.remove(save_path)
         os.rename(temp_path, save_path)
 
-        print(f"[LobeManager] Saved Lobe {lobe_id} to {os.path.basename(save_path)}")
+        print(f"[LobeManager] Saved Lobe {lobe_id} ({handle.genome}).")
         return save_path
 
     def _import_genetics(self, genome_name: str):
         """
-        Dynamically imports the genetics module.
-        Handles strict matching and fuzzy fallback.
+        Resolves "MaskedDiffusion-mHC" -> "diffusion_mhc.py" using the registry.
         """
-        # 1. Direct path check
-        target_file = f"{genome_name}.py"
-        path = os.path.join(self.genetics_dir, target_file)
+        # 1. Check Registry
+        filename = self._genetics_registry.get(genome_name)
 
+        # 2. If not in registry, try literal (fallback for old saves or direct filenames)
+        if not filename:
+            filename = f"{genome_name}.py"
+
+        path = os.path.join(self.genetics_dir, filename)
+
+        # 3. Final File Existence Check
         if not os.path.exists(path):
-            # 2. Fuzzy Search (Case insensitive)
-            found = [f for f in os.listdir(self.genetics_dir)
-                     if f.lower() == target_file.lower()]
+            # Try fuzzy match against directory as last resort
+            found = [f for f in os.listdir(self.genetics_dir) if f.lower() == filename.lower()]
             if found:
                 path = os.path.join(self.genetics_dir, found[0])
             else:
-                raise GeneticsNotFoundError(f"Genetics module '{genome_name}' not found in {self.genetics_dir}")
+                raise GeneticsNotFoundError(f"Genetics '{genome_name}' not found (tried {filename}).")
 
-        # 3. Import
         try:
             spec = importlib.util.spec_from_file_location(genome_name, path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             return module
         except Exception as e:
-            raise GeneticsNotFoundError(f"Failed to import genetics '{genome_name}': {e}")
+            raise GeneticsNotFoundError(f"Failed to import '{genome_name}' from {filename}: {e}")

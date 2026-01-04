@@ -20,27 +20,35 @@ import os
 import torchaudio
 
 # Internal Organelles
-from Organelles.thalamus import Organelle_Thalamus
-from Organelles.membrane import Organelle_Membrane
+try:
+    from Organelles.thalamus import Organelle_Thalamus
+    from Organelles.membrane import Organelle_Membrane
+except ImportError:
+    # Fallback if running standalone for testing
+    pass
 
 # Optional Neural Codecs
 try:
     from magvit2_pytorch import MagViT2
+
     HAS_MAGVIT = True
 except ImportError:
     HAS_MAGVIT = False
 
 try:
     from torchaudio.models import encodec_model_24khz
+
     HAS_ENCODEC = True
 except ImportError:
     HAS_ENCODEC = False
+
 
 class RibosomeConfig:
     """Standard sensory resolutions."""
     image_size = 256
     patch_size = 16
     audio_sr = 24000
+
 
 class Organelle_Ribosome:
     def __init__(self, device: str, golgi=None):
@@ -63,6 +71,7 @@ class Organelle_Ribosome:
         try:
             weights = ViT_B_16_Weights.DEFAULT
             self.retina = vit_b_16(weights=weights).to(device)
+
             # Patch forward to return features, not classification
             def forward_features(x):
                 x = self.retina._process_input(x)
@@ -71,6 +80,7 @@ class Organelle_Ribosome:
                 x = torch.cat([batch_class_token, x], dim=1)
                 x = self.retina.encoder(x)
                 return x
+
             self.retina.forward = forward_features
             self.retina.eval()
             self.visual_transform = weights.transforms()
@@ -85,15 +95,31 @@ class Organelle_Ribosome:
         if HAS_MAGVIT:
             try:
                 spatial_tokens = (self.config.image_size // self.config.patch_size) ** 2
-                self.magvit = MagViT2(
-                    num_codes=16384,
-                    image_size=self.config.image_size,
-                    dim=512,
-                    depth=8,
-                    num_tokens_per_block=spatial_tokens,
-                    channels=3,
-                    use_3d=True
-                ).to(device)
+
+                # --- ROBUST INIT FIX ---
+                # Some versions use 'num_codes', others 'num_tokens'
+                try:
+                    self.magvit = MagViT2(
+                        num_codes=16384,
+                        image_size=self.config.image_size,
+                        dim=512,
+                        depth=8,
+                        num_tokens_per_block=spatial_tokens,
+                        channels=3,
+                        use_3d=True
+                    ).to(device)
+                except TypeError:
+                    self._log("MagViT arg mismatch, retrying with 'num_tokens'...", "WARN")
+                    self.magvit = MagViT2(
+                        num_tokens=16384,
+                        image_size=self.config.image_size,
+                        dim=512,
+                        depth=8,
+                        num_tokens_per_block=spatial_tokens,
+                        channels=3,
+                        use_3d=True
+                    ).to(device)
+
                 self.magvit.eval()
                 self._log("MagViT-v2 Online.", "SUCCESS")
             except Exception as e:
@@ -177,7 +203,7 @@ class Organelle_Ribosome:
     # --- TRANSLATION UTILS ---
     def _tokenize(self, text):
         """Safe text -> int list"""
-        if not text: return [50256] # Empty/EOS
+        if not text: return [50256]  # Empty/EOS
         try:
             # Handle different tokenizer types
             if hasattr(self.tokenizer, "encode") and not isinstance(self.tokenizer, tiktoken.Encoding):
@@ -189,7 +215,7 @@ class Organelle_Ribosome:
 
             if hasattr(toks, "ids"): toks = toks.ids
             if isinstance(toks, torch.Tensor): toks = toks.tolist()
-            return toks[:2048] # Safety clip
+            return toks[:2048]  # Safety clip
         except:
             return [50256]
 
@@ -231,7 +257,7 @@ class Organelle_Ribosome:
             else:
                 rec = self.magvit.decode_from_indices(indices)
 
-        if rec.ndim == 5: rec = rec[:, :, 0, :, :] # Remove temporal dim
+        if rec.ndim == 5: rec = rec[:, :, 0, :, :]  # Remove temporal dim
 
         rec = (rec.clamp(-1, 1) + 1) / 2
         rec = rec[0].permute(1, 2, 0).cpu().numpy() * 255

@@ -13,6 +13,17 @@ for experimenting with hybrid autoregressive + diffusion architectures,
 persistent memory graphs, and local multimodal training.
 """
 
+"""
+AEIOU Brain — Local Multimodal AI Ecosystem
+
+Copyright © 2026 Frederick von Rönge
+GitHub: https://github.com/vonronge/aeiou-brain
+
+The Cortex (GUI):
+The visual interface for the synthetic organism.
+Initializes organelles, manages the window lifecycle, and loads functional plugins (tabs).
+"""
+
 import tkinter as tk
 from tkinter import ttk, messagebox
 import os
@@ -143,7 +154,7 @@ class BrainApp(tk.Tk):
 
         # G. Hippocampus (Raw Memory Graph)
         try:
-            self.hippocampus = Organelle_Hippocampus(self.paths["memories"], self.device)
+            self.hippocampus = Organelle_Hippocampus(self.paths["memories"], self.device, golgi=self.golgi)
         except Exception as e:
             self.golgi.error(f"Hippocampus failure: {e}", source="Cortex")
             self.hippocampus = None
@@ -441,27 +452,35 @@ class BrainApp(tk.Tk):
     def apply_theme(self):
         style = ttk.Style()
         style.theme_use('clam')
+
         c = self.colors
         s = self.ui_scale
 
+        # Font Calculations
         base_font = ("Segoe UI", int(11 * s))
         bold_font = ("Segoe UI", int(11 * s), "bold")
         head_font = ("Segoe UI", int(12 * s), "bold")
 
-        # Global Font
+        # 1. Global Defaults
         self.option_add("*font", base_font)
         self.option_add("*TCombobox*Listbox.font", base_font)
+        self.option_add("*TCombobox*Listbox.background", c["BG_CARD"])
+        self.option_add("*TCombobox*Listbox.foreground", c["FG_TEXT"])
+        self.option_add("*TCombobox*Listbox.selectBackground", c["ACCENT"])
+        self.option_add("*TCombobox*Listbox.selectForeground", c["BG_MAIN"])
 
+        # 2. General Widgets
         style.configure(".", background=c["BG_MAIN"], foreground=c["FG_TEXT"], borderwidth=0)
         style.configure("TLabel", background=c["BG_MAIN"], foreground=c["FG_TEXT"], font=base_font)
         style.configure("Card.TLabel", background=c["BG_CARD"], foreground=c["FG_TEXT"], font=base_font)
 
+        # 3. Buttons
         style.configure("TButton", background=c["BTN"], foreground=c["FG_TEXT"], borderwidth=0,
                         padding=(int(15 * s), int(8 * s)), font=bold_font)
-        style.map("TButton", background=[("active", c["BTN_ACT"]), ("pressed", c["ACCENT"])],
+        style.map("TButton",
+                  background=[("active", c["BTN_ACT"]), ("pressed", c["ACCENT"])],
                   foreground=[("pressed", c["BG_MAIN"])])
 
-        # Lobe Buttons
         style.configure("Lobe.TButton", background=c["BG_CARD"], foreground=c["FG_DIM"],
                         font=head_font, bordercolor=c["BORDER"], borderwidth=1)
         style.map("Lobe.TButton", background=[("selected", c["ACCENT"])], foreground=[("selected", c["BG_MAIN"])])
@@ -470,22 +489,50 @@ class BrainApp(tk.Tk):
                         font=head_font, bordercolor=c["SUCCESS"], borderwidth=1)
         style.map("LobeLoaded.TButton", background=[("selected", c["ACCENT"])], foreground=[("selected", c["BG_MAIN"])])
 
+        # 4. ENTRY FIELDS
         style.configure("TEntry", fieldbackground=c["BG_CARD"], foreground=c["FG_TEXT"], insertcolor=c["ACCENT"],
                         borderwidth=1, bordercolor=c["BORDER"], padding=5)
 
+        # 5. SPINBOX (Scaled Arrows)
+        arrow_size = int(14 * s)
+        style.configure("TSpinbox", fieldbackground=c["BG_CARD"], background=c["BTN"], foreground=c["FG_TEXT"],
+                        arrowcolor=c["FG_TEXT"], borderwidth=1, bordercolor=c["BORDER"], arrowsize=arrow_size)
+        style.map("TSpinbox", fieldbackground=[("readonly", c["BG_CARD"])], foreground=[("readonly", c["FG_TEXT"])])
+
+        # 6. COMBOBOX (Scaled Arrows)
+        style.configure("TCombobox", fieldbackground=c["BG_CARD"], background=c["BTN"], foreground=c["FG_TEXT"],
+                        arrowcolor=c["FG_TEXT"], borderwidth=1, bordercolor=c["BORDER"], arrowsize=arrow_size)
+        style.map("TCombobox", fieldbackground=[("readonly", c["BG_CARD"])],
+                  selectbackground=[("readonly", c["BG_CARD"])],
+                  selectforeground=[("readonly", c["FG_TEXT"])],
+                  foreground=[("readonly", c["FG_TEXT"])])
+
+        # 7. CHECKBUTTONS (Fix for Tiny Boxes)
+        indicator_size = int(14 * s)
+        style.configure("TCheckbutton", background=c["BG_MAIN"], foreground=c["FG_TEXT"],
+                        font=base_font, indicatorsize=indicator_size)
+        style.map("TCheckbutton", background=[("active", c["BG_MAIN"])],
+                  indicatorcolor=[("selected", c["ACCENT"]), ("!selected", c["BG_CARD"])])
+
+        # 8. SLIDERS (Fix for Tiny Knobs)
+        slider_len = int(20 * s)
+        slider_thick = int(10 * s)
+        style.configure("Horizontal.TScale", background=c["BG_MAIN"], troughcolor=c["BG_CARD"],
+                        sliderlength=slider_len, sliderthickness=slider_thick, bordercolor=c["BG_MAIN"])
+
+        # 9. FRAMES / TREES
         style.configure("TLabelframe", background=c["BG_CARD"], borderwidth=1, bordercolor=c["BORDER"])
         style.configure("TLabelframe.Label", background=c["BG_CARD"], foreground=c["ACCENT"], font=bold_font)
         style.configure("Card.TFrame", background=c["BG_CARD"])
 
-        # Treeview
         style.configure("Treeview", background=c["BG_MAIN"], foreground=c["FG_TEXT"], fieldbackground=c["BG_MAIN"],
                         borderwidth=1, bordercolor=c["BORDER"], font=("Consolas", int(10 * s)))
         style.configure("Treeview.Heading", background=c["BG_CARD"], foreground=c["FG_TEXT"], borderwidth=1,
                         bordercolor=c["BORDER"], padding=5)
         style.map("Treeview.Heading", background=[("active", c["BTN_ACT"])])
 
-        style.configure("Vertical.TScrollbar", gripcount=0, background=c["SCROLL"], troughcolor=c["BG_CARD"],
-                        bordercolor=c["BG_CARD"], arrowsize=0)
+        style.configure("Vertical.TScrollbar", gripcount=0, background=c["SCROLL"],
+                        troughcolor=c["BG_CARD"], bordercolor=c["BG_CARD"], arrowsize=0)
 
         # Notify Plugins
         for p in self.plugins.values():

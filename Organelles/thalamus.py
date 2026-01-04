@@ -12,17 +12,6 @@ This file is part of AEIOU Brain, a personal open-source project
 for experimenting with hybrid autoregressive + diffusion architectures,
 persistent memory graphs, and local multimodal training.
 """
-"""
-AEIOU Brain — Local Multimodal AI Ecosystem
-
-Copyright © 2026 Frederick von Rönge
-GitHub: https://github.com/vonronge/aeiou-brain
-
-The Thalamus:
-Sensory Gating and Attention Pruning.
-Filters incoming high-density sensory streams (ViT patches) down to
-essential signals before they reach the cortex.
-"""
 
 import torch
 import torch.nn as nn
