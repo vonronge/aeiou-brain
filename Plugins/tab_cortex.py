@@ -13,13 +13,10 @@ for experimenting with hybrid autoregressive + diffusion architectures,
 persistent memory graphs, and local multimodal training.
 """
 
-
-
 import tkinter as tk
 from tkinter import ttk, messagebox, filedialog
 import os
 import shutil
-import importlib.util
 from datetime import datetime
 
 
@@ -29,7 +26,6 @@ class Plugin:
         self.app = app
         self.name = "Cortex Control"
 
-        self.available_genetics = {}
         self.genome_var = tk.StringVar(value="Choose Genetics")
         self.info_text = tk.StringVar(value="Select a genetic structure to initialize.")
         self.status_labels = {}
@@ -40,32 +36,34 @@ class Plugin:
         self._refresh_ui()
 
     def _scan_genetics(self):
-        """Scans the Genetics folder to populate the dropdown."""
-        self.available_genetics = {}
-        g_dir = self.app.paths['genetics']
-        if not os.path.exists(g_dir): return
-
-        files = [f for f in os.listdir(g_dir) if f.endswith(".py") and not f.startswith("__")]
-        # Log to Golgi only on explicit rescan or init
-        # self.app.golgi.info(f"Scanning genetics in {g_dir}...", source="Cortex")
-
-        for f in files:
-            try:
-                path = os.path.join(g_dir, f)
-                spec = importlib.util.spec_from_file_location("dynamic_dna", path)
-                module = importlib.util.module_from_spec(spec)
-                spec.loader.exec_module(module)
-
-                if hasattr(module, "INFO"):
-                    name = module.INFO.get("name", f)
-                    self.available_genetics[name] = module
-                else:
-                    pass  # Skip utility files
-            except Exception as e:
-                print(f"Skipped {f}: {e}")
+        """
+        Asks the Lobe Manager to refresh its registry and returns the list
+        of human-readable names.
+        """
+        self.app.lobe_manager.refresh_registry()
+        names = self.app.lobe_manager.list_available_genetics()
 
         if hasattr(self, 'combo'):
-            self.combo['values'] = list(self.available_genetics.keys())
+            self.combo['values'] = names
+
+    def _on_select(self, event):
+        """
+        Uses Lobe Manager to resolve the display name to the actual module
+        to fetch metadata (Description, VRAM est).
+        """
+        name = self.genome_var.get()
+        try:
+            # We access the internal import method to ensure we use the
+            # exact same file resolution logic as the Manager.
+            module = self.app.lobe_manager._import_genetics(name)
+
+            if hasattr(module, "INFO"):
+                info = module.INFO
+                self.info_text.set(f"{info.get('desc', '')}\nEst. VRAM: {info.get('vram_train', '?')}")
+            else:
+                self.info_text.set("No metadata available for this module.")
+        except Exception as e:
+            self.info_text.set(f"Could not read genetics info: {e}")
 
     def _setup_ui(self):
         scale = getattr(self.app, 'ui_scale', 1.0)
@@ -120,19 +118,12 @@ class Plugin:
 
         ttk.Button(frame_mgmt, text="🔄 Rescan Genetics Folder", command=self._scan_genetics).pack(fill="x", pady=10)
 
-    def _on_select(self, event):
-        name = self.genome_var.get()
-        if name in self.available_genetics:
-            info = self.available_genetics[name].INFO
-            self.info_text.set(f"{info.get('desc', '')}\nEst. VRAM: {info.get('vram_train', '?')}")
-
     def _refresh_ui(self):
         scale = getattr(self.app, 'ui_scale', 1.0)
         font_norm = ("Segoe UI", int(10 * scale))
         font_bold = ("Segoe UI", int(10 * scale), "bold")
 
         for i in range(1, 5):
-            # Ask Manager for status
             handle = self.app.lobe_manager.get_lobe(i)
             lbl = self.status_labels[i]
 
@@ -141,12 +132,10 @@ class Plugin:
             f_style = font_bold if is_active_slot else font_norm
 
             if handle:
-                # Online
                 opt_str = "Muon" if "Muon" in str(handle.optimizer) else "AdamW"
                 lbl.config(text=f"{prefix}Lobe {i}: ONLINE ({handle.genome} | {handle.model_type}) [{opt_str}]",
                            foreground=self.app.colors["SUCCESS"], font=f_style)
             else:
-                # Offline check
                 path = os.path.join(self.app.paths['lobes'], f"brain_lobe_{i}.pt")
                 if os.path.exists(path):
                     lbl.config(text=f"{prefix}Lobe {i}: OFFLINE (Ready)",
@@ -157,8 +146,6 @@ class Plugin:
 
     def _activate_brain(self):
         active_id = self.app.active_lobe.get()
-
-        # Check if already loaded
         if self.app.lobe_manager.get_lobe(active_id):
             messagebox.showinfo("Info", f"Lobe {active_id} is already active.")
             return
@@ -185,8 +172,7 @@ class Plugin:
     def _init_brain(self):
         active_id = self.app.active_lobe.get()
         genome = self.genome_var.get()
-
-        if genome not in self.available_genetics:
+        if not genome or genome == "Choose Genetics":
             messagebox.showerror("Error", "Please select a valid genetics module.")
             return
 
@@ -206,7 +192,6 @@ class Plugin:
 
     def _save_brain(self):
         active_id = self.app.active_lobe.get()
-        # Check loaded
         if not self.app.lobe_manager.get_lobe(active_id):
             messagebox.showerror("Error", "Lobe not loaded.")
             return
@@ -222,13 +207,8 @@ class Plugin:
     def _load_brain(self):
         active_id = self.app.active_lobe.get()
         f = filedialog.askopenfilename(initialdir=self.app.paths['lobes'], filetypes=[("Brain Files", "*.pt")])
-
         if f:
             try:
-                # To load a custom file into slot X, we copy it to brain_lobe_X.pt and load
-                # OR we implement a "load_from_path" in manager.
-                # Standard AEIOU workflow is slots. Let's copy it to slot.
-
                 if messagebox.askyesno("Import", f"Import this file into Lobe Slot {active_id}?"):
                     target = os.path.join(self.app.paths['lobes'], f"brain_lobe_{active_id}.pt")
                     shutil.copy2(f, target)
@@ -242,7 +222,6 @@ class Plugin:
     def _backup_brain(self):
         active_id = self.app.active_lobe.get()
         path = os.path.join(self.app.paths['lobes'], f"brain_lobe_{active_id}.pt")
-
         if not os.path.exists(path): return
 
         backup_dir = os.path.join(self.app.paths['lobes'], "backups")

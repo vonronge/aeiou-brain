@@ -39,8 +39,9 @@ class TrainConfig:
 
 
 class Organelle_Cytoplasm:
-    def __init__(self, device: str):
+    def __init__(self, device: str, golgi=None):
         self.device = device
+        self.golgi = golgi
         self.stop_requested = False
         self.is_paused = False
 
@@ -51,7 +52,7 @@ class Organelle_Cytoplasm:
     def register_callback(self, event: str, fn: Callable):
         """Registers a callback if it isn't already registered."""
         if event in self._callbacks:
-            if fn not in self._callbacks[event]:  # <--- FIX: Prevent Duplicates
+            if fn not in self._callbacks[event]:
                 self._callbacks[event].append(fn)
 
     def clear_callbacks(self, event: str = None):
@@ -68,11 +69,21 @@ class Organelle_Cytoplasm:
         self.is_paused = not self.is_paused
 
     def _trigger(self, event: str, *args):
+        # 1. Execute Callbacks
         for fn in self._callbacks.get(event, []):
             try:
                 fn(*args)
             except Exception as e:
-                print(f"[Cytoplasm] Callback Error ({event}): {e}")
+                msg = f"Callback Failed ({event}): {e}"
+                if self.golgi:
+                    self.golgi.error(msg, source="Cytoplasm")
+                else:
+                    print(f"[Cytoplasm] {msg}")
+
+        # 2. System Logging for Critical Events
+        if event == "error" and args:
+            err = args[0]
+            if self.golgi: self.golgi.error(f"Training Crash: {err}", source="Cytoplasm")
 
     def train(self, config: TrainConfig, lobe: LobeHandle, dataset_iterator, mode: str = "ar"):
         self.stop_requested = False
@@ -80,7 +91,12 @@ class Organelle_Cytoplasm:
         lobe.train()
 
         step_count = 0
-        print(f"[Cytoplasm] Starting {mode.upper()} training on Lobe {lobe.id}...")
+
+        start_msg = f"Starting {mode.upper()} training on Lobe {lobe.id}..."
+        if self.golgi:
+            self.golgi.info(start_msg, source="Cytoplasm")
+        else:
+            print(f"[Cytoplasm] {start_msg}")
 
         try:
             for epoch in range(1, config.epochs + 1):

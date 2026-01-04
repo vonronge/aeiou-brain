@@ -85,7 +85,7 @@ class BrainApp(tk.Tk):
                 pass
 
         super().__init__()
-        self.title("AEIOU Brain - The Unified Cortex (v24.3 Stable)")
+        self.title("AEIOU Brain - The Unified Cortex (v24.4)")
 
         if os.name == 'nt':
             try:
@@ -125,7 +125,8 @@ class BrainApp(tk.Tk):
             ribosome=self.ribosome
         )
 
-        self.cytoplasm = Organelle_Cytoplasm(self.device)
+        # -- UPDATED: Pass golgi here for better logging --
+        self.cytoplasm = Organelle_Cytoplasm(self.device, golgi=self.golgi)
 
         try:
             self.hippocampus = Organelle_Hippocampus(self.paths["memories"], self.device, golgi=self.golgi)
@@ -347,7 +348,6 @@ class BrainApp(tk.Tk):
             self.lobe_btns[i].configure(style=style)
 
     def save_state(self):
-        # Renamed from persist_state back to save_state for compatibility
         self.phagus.state.last_active_lobe = self.active_lobe.get()
         self.phagus.state.window_geometry = self.geometry()
         self.phagus.state.window_state = self.state()
