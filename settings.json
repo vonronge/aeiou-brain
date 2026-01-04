@@ -52,7 +52,7 @@
     "tab_factory",
     "tab_video_factory",
     "tab_comic",
-    "tab_graphs",
-    "tab_settings"
+    "tab_settings",
+    "tab_graphs"
   ]
 }

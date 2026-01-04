@@ -14,7 +14,7 @@ persistent memory graphs, and local multimodal training.
 """
 
 import tkinter as tk
-from tkinter import ttk, colorchooser, messagebox
+from tkinter import ttk, messagebox, filedialog, colorchooser
 import json
 import os
 
@@ -23,154 +23,163 @@ class Plugin:
     def __init__(self, parent, app):
         self.parent = parent
         self.app = app
-        self.name = "System Config"
+        self.name = "System Settings"
 
-        self.config_path = os.path.join(self.app.paths["root"], "settings.json")
-        self.local_colors = self.app.colors.copy()
+        # --- VARIABLES ---
+        # Scaling
+        self.scale_var = tk.DoubleVar(value=getattr(self.app, 'ui_scale', 1.3))
 
-        # --- DEFINING THE 4 SCHEMES ---
-        self.SCHEMES = {
-            "NOSTROMO": {  # Default Sci-Fi
-                "BG_MAIN": "#0b0f19", "BG_CARD": "#131620", "FG_TEXT": "#E3E3E3",
-                "FG_DIM": "#8e9198", "ACCENT": "#A8C7FA", "BTN": "#1E222D",
-                "BTN_ACT": "#2B3042", "SUCCESS": "#81C995", "ERROR": "#F28B82",
-                "WARN": "#FDD663", "BORDER": "#444444", "GRID": "#333333", "SCROLL": "#2B3042"
-            },
-            "APERTURE": {  # Light/Lab
-                "BG_MAIN": "#F0F2F5", "BG_CARD": "#FFFFFF", "FG_TEXT": "#1A1A1A",
-                "FG_DIM": "#606060", "ACCENT": "#007ACC", "BTN": "#E1E4E8",
-                "BTN_ACT": "#D1D5DA", "SUCCESS": "#2EA043", "ERROR": "#DA3633",
-                "WARN": "#D29922", "BORDER": "#E1E4E8", "GRID": "#E1E1E1", "SCROLL": "#C0C4C8"
-            },
-            "MATRIX": {  # Hacker
-                "BG_MAIN": "#000000", "BG_CARD": "#0D110D", "FG_TEXT": "#00FF41",
-                "FG_DIM": "#008F11", "ACCENT": "#00FF41", "BTN": "#003B00",
-                "BTN_ACT": "#005500", "SUCCESS": "#00FF41", "ERROR": "#FF0000",
-                "WARN": "#FFFF00", "BORDER": "#003B00", "GRID": "#002200", "SCROLL": "#003B00"
-            },
-            "NEON": {  # Cyberpunk
-                "BG_MAIN": "#120024", "BG_CARD": "#1F003D", "FG_TEXT": "#E0E0E0",
-                "FG_DIM": "#B07CC6", "ACCENT": "#FF00FF", "BTN": "#2D0052",
-                "BTN_ACT": "#45007A", "SUCCESS": "#00FFC8", "ERROR": "#FF0055",
-                "WARN": "#FFE600", "BORDER": "#45007A", "GRID": "#2D0052", "SCROLL": "#45007A"
-            }
+        # Paths (Load current absolute paths or defaults)
+        self.path_vars = {
+            "data_dir": tk.StringVar(value=self.app.paths.get("data", "")),
+            "chaos_dir": tk.StringVar(value=self.app.paths.get("chaos", "")),
+            "output_dir": tk.StringVar(value=self.app.paths.get("output", ""))
         }
 
-        self.color_vars = {}
-        for key, val in self.local_colors.items():
-            self.color_vars[key] = tk.StringVar(value=val)
+        # Colors (Theme)
+        self.col_vars = {
+            "ACCENT": tk.StringVar(value=self.app.colors.get("ACCENT", "#A8C7FA")),
+            "BG_MAIN": tk.StringVar(value=self.app.colors.get("BG_MAIN", "#0b0f19")),
+            "BG_CARD": tk.StringVar(value=self.app.colors.get("BG_CARD", "#131620"))
+        }
 
         self._setup_ui()
 
     def _setup_ui(self):
-        # 1. THEME GALLERY (2x2 Grid)
-        gallery_frame = ttk.LabelFrame(self.parent, text="Visual Core Presets", padding=10)
-        gallery_frame.pack(fill="x", padx=20, pady=10)
+        # Scrollable container for settings
+        canvas = tk.Canvas(self.parent, borderwidth=0, highlightthickness=0, bg=self.app.colors["BG_MAIN"])
+        scrollbar = ttk.Scrollbar(self.parent, orient="vertical", command=canvas.yview)
+        scroll_frame = ttk.Frame(canvas)
 
-        col = 0
-        row = 0
+        scroll_frame.bind(
+            "<Configure>",
+            lambda e: canvas.configure(scrollregion=canvas.bbox("all"))
+        )
 
-        for name, scheme in self.SCHEMES.items():
-            # Card Frame
-            card = tk.Frame(gallery_frame, bg=scheme["BG_CARD"], bd=1, relief="solid")
-            card.grid(row=row, column=col, padx=10, pady=10, sticky="nsew")
-            gallery_frame.columnconfigure(col, weight=1)
+        canvas.create_window((0, 0), window=scroll_frame, anchor="nw")
+        canvas.configure(yscrollcommand=scrollbar.set)
 
-            # Preview Content
-            header = tk.Label(card, text=name, bg=scheme["BG_CARD"], fg=scheme["ACCENT"], font=("Segoe UI", 12, "bold"))
-            header.pack(pady=(10, 5))
+        canvas.pack(side="left", fill="both", expand=True, padx=10, pady=10)
+        scrollbar.pack(side="right", fill="y")
 
-            sub = tk.Label(card, text="System Interface", bg=scheme["BG_CARD"], fg=scheme["FG_DIM"],
-                           font=("Segoe UI", 9))
-            sub.pack(pady=(0, 10))
+        # Hook mousewheel
+        def _on_mousewheel(event):
+            if os.name == 'nt' or sys.platform == 'darwin':
+                canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+            elif event.num == 4:
+                canvas.yview_scroll(-1, "units")
+            elif event.num == 5:
+                canvas.yview_scroll(1, "units")
 
-            # Activate Button
-            btn = tk.Button(card, text="ACTIVATE", bg=scheme["BTN"], fg=scheme["FG_TEXT"], relief="flat",
-                            activebackground=scheme["BTN_ACT"], activeforeground=scheme["FG_TEXT"],
-                            command=lambda s=scheme: self._apply_live(s))
-            btn.pack(fill="x", padx=20, pady=10)
+        scroll_frame.bind_all("<MouseWheel>", _on_mousewheel)
 
-            col += 1
-            if col > 1:
-                col = 0
-                row += 1
+        # --- SECTION 1: DISPLAY ---
+        fr_disp = ttk.LabelFrame(scroll_frame, text="Display & Scaling", padding=15)
+        fr_disp.pack(fill="x", pady=5)
 
-        # 2. FINE TUNING
-        tune_frame = ttk.LabelFrame(self.parent, text="Manual Override", padding=15)
-        tune_frame.pack(fill="both", expand=True, padx=20, pady=5)
+        ttk.Label(fr_disp, text="UI Zoom Level (Requires Restart):").pack(anchor="w")
 
-        r = 0
-        c = 0
-        keys = sorted(self.local_colors.keys())
-        for key in keys:
-            if key not in self.color_vars: continue
+        scl_row = ttk.Frame(fr_disp)
+        scl_row.pack(fill="x", pady=5)
 
-            ttk.Label(tune_frame, text=key).grid(row=r, column=c, sticky="w", padx=5)
+        scl = ttk.Scale(scl_row, from_=0.8, to=3.0, variable=self.scale_var, orient="horizontal")
+        scl.pack(side="left", fill="x", expand=True)
 
-            # Swatch
-            btn = tk.Button(tune_frame, bg=self.color_vars[key].get(), width=4,
-                            command=lambda k=key: self._pick_color(k))
-            btn.grid(row=r, column=c + 1, padx=5, pady=2)
+        lbl_scl = ttk.Label(scl_row, text=f"{self.scale_var.get():.1f}x", width=5)
+        lbl_scl.pack(side="right", padx=10)
+        scl.configure(command=lambda v: lbl_scl.configure(text=f"{float(v):.1f}x"))
 
-            setattr(self, f"btn_{key}", btn)
+        # --- SECTION 2: STORAGE PATHS ---
+        fr_paths = ttk.LabelFrame(scroll_frame, text="Storage Configuration", padding=15)
+        fr_paths.pack(fill="x", pady=10)
 
-            r += 1
-            if r > 6:
-                r = 0
-                c += 2
+        def add_path_row(label, key):
+            f = ttk.Frame(fr_paths)
+            f.pack(fill="x", pady=5)
+            ttk.Label(f, text=label, width=15, anchor="w").pack(side="left")
+            ttk.Entry(f, textvariable=self.path_vars[key]).pack(side="left", fill="x", expand=True, padx=5)
+            ttk.Button(f, text="📂", width=4,
+                       command=lambda: self._browse_path(self.path_vars[key])).pack(side="right")
 
-        # 3. SAVE
-        ttk.Button(self.parent, text="SAVE CONFIGURATION", command=self._save_config).pack(fill="x", padx=20, pady=10)
+        add_path_row("Training Data:", "data_dir")
+        add_path_row("Chaos Buffer:", "chaos_dir")
+        add_path_row("Comics Output:", "output_dir")
 
-    def _apply_live(self, theme):
-        # 1. Update App State
-        self.app.colors.update(theme)
+        ttk.Label(fr_paths, text="* Relative paths are relative to the app folder. Absolute paths recommended.",
+                  font=("Segoe UI", 9, "italic"), foreground=self.app.colors["FG_DIM"]).pack(anchor="w", pady=(5, 0))
 
-        # 2. Update UI Vars
-        for k, v in theme.items():
-            if k in self.color_vars:
-                self.color_vars[k].set(v)
-                if hasattr(self, f"btn_{k}"):
-                    getattr(self, f"btn_{k}").config(bg=v)
+        # --- SECTION 3: THEME ---
+        fr_theme = ttk.LabelFrame(scroll_frame, text="Theme Customization", padding=15)
+        fr_theme.pack(fill="x", pady=10)
 
-        # 3. Trigger Global Refresh
-        self.app.apply_theme()
-        self._save_config(silent=True)
+        def add_col_row(label, key):
+            f = ttk.Frame(fr_theme)
+            f.pack(fill="x", pady=5)
+            ttk.Label(f, text=label, width=15, anchor="w").pack(side="left")
 
-    def _pick_color(self, key):
-        curr = self.color_vars[key].get()
-        color = colorchooser.askcolor(color=curr, title=f"Override {key}")
-        if color[1]:
-            hex_val = color[1]
-            self.color_vars[key].set(hex_val)
-            getattr(self, f"btn_{key}").config(bg=hex_val)
-            # Apply immediately to see effect
-            self.app.colors[key] = hex_val
-            self.app.apply_theme()
+            # Preview box
+            lbl_prev = tk.Label(f, bg=self.col_vars[key].get(), width=4, relief="solid", borderwidth=1)
+            lbl_prev.pack(side="left", padx=5)
 
-    def _save_config(self, silent=False):
-        # Sync vars to app state
-        new_colors = {k: v.get() for k, v in self.color_vars.items()}
-        self.app.colors.update(new_colors)
+            entry = ttk.Entry(f, textvariable=self.col_vars[key])
+            entry.pack(side="left", fill="x", expand=True, padx=5)
 
-        data = {}
-        if os.path.exists(self.config_path):
-            with open(self.config_path, 'r') as f:
-                try:
-                    data = json.load(f)
-                except:
-                    pass
+            def pick():
+                c = colorchooser.askcolor(color=self.col_vars[key].get())[1]
+                if c:
+                    self.col_vars[key].set(c)
+                    lbl_prev.config(bg=c)
 
-        data["colors"] = self.app.colors
+            ttk.Button(f, text="Pick", width=6, command=pick).pack(side="right")
 
+        add_col_row("Accent Color:", "ACCENT")
+        add_col_row("Main Background:", "BG_MAIN")
+        add_col_row("Card Background:", "BG_CARD")
+
+        # --- SAVE ---
+        btn_save = ttk.Button(scroll_frame, text="SAVE ALL SETTINGS", command=self._save_settings)
+        btn_save.pack(fill="x", pady=30)
+
+    def _browse_path(self, var):
+        d = filedialog.askdirectory(initialdir=var.get())
+        if d: var.set(d)
+
+    def _save_settings(self):
         try:
-            with open(self.config_path, 'w') as f:
+            config_path = os.path.join(self.app.paths["root"], "settings.json")
+
+            data = {}
+            if os.path.exists(config_path):
+                with open(config_path, 'r') as f:
+                    data = json.load(f)
+
+            # 1. Update Scale
+            data["ui_scale"] = round(self.scale_var.get(), 2)
+
+            # 2. Update Paths
+            # Note: We save them exactly as entered.
+            # GUI.py handles relative vs absolute logic on load.
+            data["data_dir"] = self.path_vars["data_dir"].get()
+            data["chaos_dir"] = self.path_vars["chaos_dir"].get()
+            data["output_dir"] = self.path_vars["output_dir"].get()
+
+            # 3. Update Colors
+            if "colors" not in data: data["colors"] = {}
+            data["colors"]["ACCENT"] = self.col_vars["ACCENT"].get()
+            data["colors"]["BG_MAIN"] = self.col_vars["BG_MAIN"].get()
+            data["colors"]["BG_CARD"] = self.col_vars["BG_CARD"].get()
+
+            # Write
+            with open(config_path, 'w') as f:
                 json.dump(data, f, indent=2)
-            if not silent:
-                messagebox.showinfo("System Update", "Theme saved successfully.")
+
+            if messagebox.askyesno("Saved",
+                                   "Settings saved successfully.\n\nRestart Application now to apply changes?"):
+                self.app.destroy()
+                # Optional: self-restart logic could go here, but usually safer to just close
+
         except Exception as e:
             messagebox.showerror("Error", f"Could not save settings: {e}")
 
     def on_theme_change(self):
-        # Called when theme changes externally (to update swatches if needed)
         pass
