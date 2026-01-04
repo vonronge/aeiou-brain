@@ -37,7 +37,7 @@ Built solo in 2025–2026 on a single RTX 3080 Ti.
    - Go to **Cortex Control** tab (default on launch)
    - Select a lobe slot (LOBE 1–4) in the header
    - **Create a new lobe**:
-     - Choose "Target Genetics" from dropdown (e.g., "MaskedDiffusion-mHC" for diffusion dreaming, "Tetra-Llama" for strong reasoning, the most advanced model is diffusion_mhc.py)
+     - Choose "Target Genetics" from dropdown (e.g., "MaskedDiffusion-mHC" for diffusion dreaming, "Tetra-Llama" for strong reasoning)
      - Click **INITIALIZE NEW** → creates fresh weights with selected architecture
    - **Load an existing lobe**:
      - Place `.pt` files in the `lobes/` folder (or use LOAD FILE button)
@@ -69,11 +69,50 @@ Built solo in 2025–2026 on a single RTX 3080 Ti.
    - **Dream State**: Free-run consolidation/hallucination on chaos buffer
    - **Playground**: Chat/generate with active lobe
 
-### Requirements
-- Python 3.10+
-- PyTorch (with CUDA/MPS for GPU)
-- Other libs: tkinter, torchvision, torchaudio, pymupdf, magvit2-pytorch, etc.
-Install via: `pip install torch torchvision torchaudio pymupdf magvit2-pytorch`
+### Adding New Genetics (Model Architectures)
+AEIOU is an experimental playground—adding new "genetics" (architectures) is easy and encouraged.
+
+1. Create a new `.py` file in `Genetics/` (e.g., `my_custom_arch.py`).
+2. Include:
+   - `INFO` dict (for GUI dropdown)
+   - `NucleusConfig` class (hyperparams)
+   - `Model` class inheriting from `MultimodalBase`
+
+   Basic template:
+   ```python
+   INFO = {
+       "name": "My Custom Arch",
+       "desc": "Short description",
+       "vram_train": "8 GB",
+       "vram_run": "4 GB"
+   }
+
+   class NucleusConfig:
+       def __init__(self):
+           self.vocab_size = 72000
+           self.embed_dim = 768
+           self.n_layers = 12
+           self.n_heads = 12
+           # Add custom params
+
+   class Model(MultimodalBase):
+       def __init__(self, config=None):
+           if config is None: config = NucleusConfig()
+           super().__init__(config)
+           # Your layers here
+
+       def forward(self, v, a, t, c=None):
+           x = self.embed_inputs(v, a, t, c)
+           # Custom processing
+           return self.head(x), None, None
+
+
+3. Restart GUI—new option appears in Cortex Control.
+
+**Tip**: Use Grok, Gemini, Claude, etc. to brainstorm code. Prompt example:
+"I'm adding a new transformer variant to a local multimodal project. Inherit from MultimodalBase. Implement [idea] with embed_dim=768, 12 layers. Output INFO, NucleusConfig, and Model class."
+
+PRs with new genetics welcome!
 
 ### Author
 Created and maintained by **Frederick von Rönge**  
