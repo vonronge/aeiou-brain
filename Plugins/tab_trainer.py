@@ -13,8 +13,6 @@ for experimenting with hybrid autoregressive + diffusion architectures,
 persistent memory graphs, and local multimodal training.
 """
 
-
-
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import threading
@@ -118,6 +116,7 @@ class Plugin:
             self.nurse_pred = [MockVar(0.1), MockVar(2.5), MockVar(True)]
             self.nurse_game = [MockVar(0.001), MockVar(15.0), MockVar(True)]
             self.nurse_aux = [MockVar(1.0), MockVar(5.0), MockVar(False)]
+            self.num_workers = MockVar(4)
         else:
             # GUI
             self.folder_path = tk.StringVar(value=default_path)
@@ -133,6 +132,7 @@ class Plugin:
             self.nurse_pred = [tk.DoubleVar(value=0.1), tk.DoubleVar(value=2.5), tk.BooleanVar(value=True)]
             self.nurse_game = [tk.DoubleVar(value=0.001), tk.DoubleVar(value=15.0), tk.BooleanVar(value=True)]
             self.nurse_aux = [tk.DoubleVar(value=1.0), tk.DoubleVar(value=5.0), tk.BooleanVar(value=False)]
+            self.num_workers = tk.IntVar(value=4)
 
         self._setup_ui()
         if self.parent:
@@ -271,35 +271,138 @@ class Plugin:
     # --- SCANNING ---
     def _scan(self):
         folder = self.folder_path.get()
-        if not os.path.exists(folder): return
+        if not os.path.exists(folder):
+            self._log("Folder not found.")
+            return
 
         self._log(f"Scanning {folder}...")
-
-        # Simple scan logic to populate Census
         self.all_scanned_packets = []
+        self.train_type_vars = {}
+        self.train_ext_vars = {}
 
-        ext_map = {'.png': 'v', '.jpg': 'v', '.txt': 't', '.wav': 'a', '.json': 'c'}
+        # --- FULL PACKET ASSEMBLY LOGIC ---
+        ext_map = {
+            'v': {'.png', '.jpg', '.jpeg', '.bmp', '.gif', '.webp'},
+            'a': {'.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac'},
+            'c': {'.json', '.csv', '.ctl'},
+            't': {'.txt', '.md', '.json', '.pdf', '.epub', '.mobi', '.rtf', '.doc', '.docx', '.srt', '.vtt', '.ass'},
+            'vid': {'.mp4', '.mkv', '.avi', '.mov'}
+        }
+        all_valid_exts = set().union(*ext_map.values())
+
         file_sets = {}
+        ext_counts = {}
 
-        for root, _, files in os.walk(folder):
-            for f in files:
+        # 1. Walk Files
+        for root, _, fs in os.walk(folder):
+            for f in fs:
                 base, ext = os.path.splitext(f)
-                if ext.lower() in ext_map:
-                    key = os.path.join(root, base)
+                lext = ext.lower()
+
+                if lext in all_valid_exts:
+                    key = os.path.join(root, base).lower()
                     if key not in file_sets: file_sets[key] = {}
-                    file_sets[key][ext_map[ext.lower()]] = os.path.join(root, f)
 
-        for p in file_sets.values():
-            if 't' in p: self.all_scanned_packets.append(p)
+                    full_path = os.path.join(root, f)
 
-        self._log(f"Found {len(self.all_scanned_packets)} valid packets.")
+                    if lext in ext_map['v']:
+                        file_sets[key]['v'] = full_path
+                    elif lext in ext_map['a']:
+                        file_sets[key]['a'] = full_path
+                    elif lext in ext_map['c']:
+                        file_sets[key]['c'] = full_path
+                    elif lext in ext_map['t']:
+                        file_sets[key]['t'] = full_path
+                    elif lext in ext_map['vid']:
+                        file_sets[key]['vid'] = full_path
 
-        # Populate Census Checkboxes
-        for w in self.scroll_fr.winfo_children(): w.destroy()
+        # 2. Classify Packets
+        q, tr, p, s = 0, 0, 0, 0
+        sorted_keys = sorted(file_sets.keys())
 
-        # (Simplified Census Logic: Just one checkbox for all)
-        # In production, use the detailed logic from previous iteration
-        ttk.Label(self.scroll_fr, text=f"Total: {len(self.all_scanned_packets)}").pack()
+        for key in sorted_keys:
+            packet = file_sets[key].copy()
+
+            # Empty Text Check
+            if 't' in packet:
+                try:
+                    if os.path.getsize(packet['t']) < 10: del packet['t']
+                except:
+                    pass
+
+            has_v = 'v' in packet
+            has_a = 'a' in packet
+            has_t = 't' in packet
+            has_c = 'c' in packet
+            has_vid = 'vid' in packet
+
+            # Quad
+            if has_v and has_a and has_t and has_c:
+                packet['type'] = 'quad'
+                self.all_scanned_packets.append(packet)
+                q += 1
+                continue
+
+            # Triplet
+            if (has_vid and has_t) or (has_v and has_a and has_t):
+                packet['type'] = 'triplet'
+                self.all_scanned_packets.append(packet)
+                tr += 1
+                continue
+
+            # Pair
+            if (has_v and has_t) or (has_a and has_t) or (has_v and has_a):
+                packet['type'] = 'pair'
+                self.all_scanned_packets.append(packet)
+                p += 1
+                continue
+
+            # Single
+            # Video Single
+            if has_vid:
+                path = packet['vid']
+                _, e = os.path.splitext(path)
+                lext = e.lower()
+                self.all_scanned_packets.append({'type': 'single', 'vid': path, 'ext': lext})
+                ext_counts[lext] = ext_counts.get(lext, 0) + 1
+                s += 1
+                continue
+
+            # Other Singles
+            for k, path in file_sets[key].items():
+                _, e = os.path.splitext(path)
+                lext = e.lower()
+                self.all_scanned_packets.append({'type': 'single', k: path, 'ext': lext})
+                ext_counts[lext] = ext_counts.get(lext, 0) + 1
+                s += 1
+
+        self._log(f"Scan: {s} Single, {p} Pair, {tr} Trip, {q} Quad.")
+
+        # 3. Update Census UI
+        if self.parent:
+            for w in self.scroll_fr.winfo_children(): w.destroy()
+
+            row = 0
+
+            def add_chk(text, var_key, container=self.train_type_vars):
+                var = tk.BooleanVar(value=True)
+                container[var_key] = var
+                ttk.Checkbutton(self.scroll_fr, text=text, variable=var).grid(row=row, column=0, sticky="w")
+
+            if q > 0: add_chk(f"Quadruplets ({q})", 'quad'); row += 1
+            if tr > 0: add_chk(f"Triplets ({tr})", 'triplet'); row += 1
+            if p > 0: add_chk(f"Pairs ({p})", 'pair'); row += 1
+
+            if row > 0:
+                ttk.Separator(self.scroll_fr, orient='horizontal').grid(row=row, column=0, sticky="ew", pady=5)
+                row += 1
+
+            for ext in sorted(ext_counts.keys()):
+                add_chk(f"{ext} ({ext_counts[ext]})", ext, self.train_ext_vars)
+                row += 1
+
+            self.scroll_fr.update_idletasks()
+            self.canvas.configure(scrollregion=self.canvas.bbox("all"))
 
     # --- START TRAINING ---
     def _start_training(self):
@@ -312,13 +415,34 @@ class Plugin:
             return
 
         # 2. Filter Queue
-        self.training_queue = self.all_scanned_packets  # Apply filters here
+        self.training_queue = []
+
+        # Helper for checkbox state
+        def safe_get(v):
+            return v.get() if v else False
+
+        t_quad = safe_get(self.train_type_vars.get('quad'))
+        t_trip = safe_get(self.train_type_vars.get('triplet'))
+        t_pair = safe_get(self.train_type_vars.get('pair'))
+        active_exts = {e for e, v in self.train_ext_vars.items() if safe_get(v)}
+
+        for p in self.all_scanned_packets:
+            pt = p['type']
+            if pt == 'quad' and t_quad:
+                self.training_queue.append(p)
+            elif pt == 'triplet' and t_trip:
+                self.training_queue.append(p)
+            elif pt == 'pair' and t_pair:
+                self.training_queue.append(p)
+            elif pt == 'single' and p.get('ext') in active_exts:
+                self.training_queue.append(p)
+
         if not self.training_queue:
             self._log("Queue empty.")
             return
 
         if self.narrative_mode.get():
-            self.training_queue.sort(key=lambda x: x.get('t', ''))
+            self.training_queue.sort(key=lambda x: x.get('t', x.get('vid', x.get('v', ''))))
 
         # 3. Stop if running
         if self.is_training:
@@ -347,10 +471,12 @@ class Plugin:
         dataset = ARDataset(self.training_queue, self.app, narrative_mode=self.narrative_mode.get())
 
         # 6. Callbacks
+        self.app.cytoplasm.clear_callbacks()  # <--- HYGIENE: Clear previous listeners
         self.app.cytoplasm.register_callback("step", self._on_step)
         self.app.cytoplasm.register_callback("epoch", lambda e: self.current_epoch_var.set(f"Epoch: {e}"))
         self.app.cytoplasm.register_callback("autosave", self._on_autosave)
         self.app.cytoplasm.register_callback("finished", self._on_finished)
+        self.app.cytoplasm.register_callback("error", lambda e: self._log(f"Error: {e}"))
 
         # 7. Launch
         threading.Thread(target=self.app.cytoplasm.train,
@@ -363,9 +489,15 @@ class Plugin:
             total = loss_dict.get("total", 0)
             self._log(f"Step {step} | Loss: {total:.4f}")
 
-            # Update Graphs if tab_graphs exists
-            # (Requires app.graph_data dict to be populated here if you want visuals)
-            # app.graph_data is available via self.app.graph_data
+            # Update Graphs
+            ep = 1
+            if ep not in self.app.graph_data:
+                self.app.graph_data[ep] = {'total': [], 'text': [], 'vis': [], 'raw_total': [], 'raw_text': [],
+                                           'raw_vis': []}
+
+            self.app.graph_data[ep]['total'].append(total)
+            self.app.graph_data[ep]['raw_total'].append(total)
+            self.app.graph_data[ep]['raw_text'].append(loss_dict.get('pred', 0))
 
     def _on_autosave(self, step):
         active_id = self.app.active_lobe.get()
