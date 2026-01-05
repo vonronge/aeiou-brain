@@ -20,6 +20,9 @@ import torch.nn.functional as F
 import threading
 import queue
 import os
+import json
+import uuid
+from datetime import datetime
 from PIL import Image, ImageTk
 
 
@@ -38,11 +41,18 @@ class Plugin:
         self.attached_image_path = None
         self.attached_image_tensor = None
 
+        # Memory Config
+        self.memory_file = os.path.join(self.app.paths["memories"], "episodic_chat_log.jsonl")
+
         # --- SETTINGS ---
         self.temperature = tk.DoubleVar(value=0.8)
         self.top_k = tk.IntVar(value=50)
         self.max_tokens = tk.IntVar(value=100)
         self.do_sample = tk.BooleanVar(value=True)
+
+        # Memory Settings
+        self.use_recall = tk.BooleanVar(value=True)
+        self.recall_threshold = tk.DoubleVar(value=0.65)  # Adjustable strength
 
         self._setup_ui()
         if self.parent:
@@ -67,7 +77,7 @@ class Plugin:
                                 state="disabled", padx=10, pady=10)
         self.chat_box.pack(side="left", fill="both", expand=True)
 
-        # Tags for coloring
+        # Tags
         self.chat_box.tag_config("user", foreground=self.app.colors["ACCENT"],
                                  font=("Segoe UI", int(11 * scale), "bold"))
         self.chat_box.tag_config("ai", foreground=self.app.colors["SUCCESS"],
@@ -84,12 +94,11 @@ class Plugin:
         fr_input = ttk.LabelFrame(fr_main, text="Input Signal", padding=10)
         fr_input.pack(fill="x", pady=(10, 0))
 
-        # Text Input
         self.txt_input = tk.Text(fr_input, height=3, font=chat_font,
                                  bg=self.app.colors["BG_CARD"], fg=self.app.colors["FG_TEXT"],
                                  insertbackground=self.app.colors["ACCENT"])
         self.txt_input.pack(fill="x", side="top", pady=(0, 5))
-        self.txt_input.bind("<Shift-Return>", lambda e: "break")  # Newline
+        self.txt_input.bind("<Shift-Return>", lambda e: "break")
         self.txt_input.bind("<Return>", self._on_enter)
 
         # Controls Row
@@ -97,25 +106,75 @@ class Plugin:
         fr_ctrl.pack(fill="x")
 
         # Attachments
-        self.btn_img = ttk.Button(fr_ctrl, text="📷 Attach Image", command=self._attach_image)
+        self.btn_img = ttk.Button(fr_ctrl, text="📷 Attach", command=self._attach_image)
         self.btn_img.pack(side="left")
 
         self.lbl_img = ttk.Label(fr_ctrl, text="", foreground=self.app.colors["FG_DIM"])
         self.lbl_img.pack(side="left", padx=5)
 
-        # Params
+        # Generation Params
         ttk.Label(fr_ctrl, text="Temp:").pack(side="left", padx=(15, 0))
         ttk.Entry(fr_ctrl, textvariable=self.temperature, width=5).pack(side="left")
 
-        ttk.Label(fr_ctrl, text="Len:").pack(side="left", padx=(5, 0))
-        ttk.Entry(fr_ctrl, textvariable=self.max_tokens, width=5).pack(side="left")
+        # Memory Controls
+        ttk.Checkbutton(fr_ctrl, text="Visual Recall", variable=self.use_recall).pack(side="left", padx=(15, 5))
 
-        # Buttons
+        # RECALL STRENGTH SLIDER
+        ttk.Label(fr_ctrl, text="Strength:").pack(side="left", padx=(0, 5))
+        self.lbl_thresh = ttk.Label(fr_ctrl, text=f"{self.recall_threshold.get():.2f}", width=4)
+        self.lbl_thresh.pack(side="left")
+
+        scale_rec = ttk.Scale(fr_ctrl, from_=0.3, to=0.99, variable=self.recall_threshold,
+                              orient="horizontal", length=80,
+                              command=lambda v: self.lbl_thresh.config(text=f"{float(v):.2f}"))
+        scale_rec.pack(side="left", padx=5)
+
+        # Send Buttons
         self.btn_send = ttk.Button(fr_ctrl, text="SEND ➤", command=self._send_message)
         self.btn_send.pack(side="right")
 
         self.btn_stop = ttk.Button(fr_ctrl, text="STOP", command=self._stop_gen, state="disabled")
         self.btn_stop.pack(side="right", padx=5)
+
+    # --- MEMORY LOGIC ---
+    def _save_to_memory(self, user_text, ai_text):
+        full_conversation = f"User: {user_text}\nLobe: {ai_text}"
+        try:
+            if hasattr(self.app.ribosome, "render_text_to_image"):
+                img = self.app.ribosome.render_text_to_image(full_conversation)
+            else:
+                from PIL import ImageDraw
+                img = Image.new('RGB', (512, 512), color=(20, 20, 20))
+                d = ImageDraw.Draw(img)
+                d.text((10, 10), full_conversation[:500], fill=(200, 200, 200))
+
+            if not os.path.exists(self.app.paths["memories"]):
+                os.makedirs(self.app.paths["memories"])
+
+            img_filename = f"memory_{uuid.uuid4()}.png"
+            img_path = os.path.join(self.app.paths["memories"], img_filename)
+            img.save(img_path)
+
+            entry = {
+                "timestamp": str(datetime.now()),
+                "user_text": user_text,
+                "ai_text": ai_text,
+                "full_text": full_conversation,
+                "image_path": img_path
+            }
+
+            with open(self.memory_file, "a", encoding="utf-8") as f:
+                f.write(json.dumps(entry) + "\n")
+
+            if self.app.hippocampus:
+                v_feat, _, _, _, _ = self.app.ribosome.ingest_packet({'v': img_path})
+                if v_feat is not None:
+                    # Flatten [1, N, D] -> [1, D] if needed
+                    if v_feat.ndim == 3: v_feat = v_feat.mean(dim=1)
+                    self.app.hippocampus.add_vector(full_conversation[:50], v_feat)
+
+        except Exception as e:
+            print(f"Memory Save Error: {e}")
 
     # --- ACTIONS ---
     def _attach_image(self):
@@ -123,13 +182,10 @@ class Plugin:
         if f:
             self.attached_image_path = f
             self.lbl_img.config(text=f"[{os.path.basename(f)}]")
-            # Pre-process immediately via Ribosome
             try:
-                # We create a dummy packet to use Membrane/Ribosome logic
                 packet = {'v': f, 'type': 'single'}
-                # Returns (v_feat, a_feat, tokens, c_emb, meta)
                 v, _, _, _, _ = self.app.ribosome.ingest_packet(packet)
-                self.attached_image_tensor = v  # Keep the dense features
+                self.attached_image_tensor = v
             except Exception as e:
                 messagebox.showerror("Error", f"Failed to process image: {e}")
                 self._clear_attachment()
@@ -148,20 +204,17 @@ class Plugin:
         text = self.txt_input.get("1.0", tk.END).strip()
         if not text and not self.attached_image_path: return
 
-        # 1. Verify Lobe
         active_id = self.app.active_lobe.get()
         lobe = self.app.lobe_manager.get_lobe(active_id)
         if not lobe:
-            self._append_chat("System", "No Lobe Loaded. Please activate a model.", "sys")
+            self._append_chat("System", "No Lobe Loaded.", "sys")
             return
 
-        # 2. Update UI
         self.txt_input.delete("1.0", tk.END)
         self._append_chat("User", text, "user")
         if self.attached_image_path:
-            self._append_chat("System", f"[Image Attached: {os.path.basename(self.attached_image_path)}]", "sys")
+            self._append_chat("System", f"[Image Attached]", "sys")
 
-        # 3. Start Inference
         self.is_generating = True
         self.stop_requested = False
         self.btn_send.config(state="disabled")
@@ -173,82 +226,105 @@ class Plugin:
         self.stop_requested = True
         self.btn_stop.config(text="STOPPING...")
 
-    # --- INFERENCE WORKER ---
+    # --- CORE WORKER ---
     def _worker(self, lobe, prompt_text):
         try:
             device = self.app.device
+            ribosome = self.app.ribosome
 
-            # 1. Tokenize Text (Ribosome)
-            # The ribosome gives us a list of ints. We need a tensor.
-            input_ids = self.app.ribosome._tokenize(prompt_text)
+            # --- 1. VISUAL EPISODIC RECALL ---
+            recalled_context_text = ""
+
+            if self.use_recall.get() and self.app.hippocampus:
+                try:
+                    # A. Render Prompt
+                    if hasattr(ribosome, "render_text_to_image"):
+                        prompt_img = ribosome.render_text_to_image(prompt_text)
+                    else:
+                        from PIL import Image
+                        prompt_img = Image.new('RGB', (256, 256))
+
+                    temp_path = os.path.join(self.app.paths["memories"], f"temp_prompt_{uuid.uuid4()}.png")
+                    prompt_img.save(temp_path)
+
+                    # B. Extract Engram
+                    v_prompt = ribosome.get_engram(temp_path)
+                    os.remove(temp_path)
+
+                    # C. Search with Dynamic Threshold
+                    thresh = self.recall_threshold.get()
+                    hits = self.app.hippocampus.search(v_prompt, top_k=2, threshold=thresh)
+
+                    if hits:
+                        self.update_queue.put(
+                            lambda: self._append_chat("System", f"Recalling {len(hits)} visual memories...", "sys"))
+
+                        for score, entity in hits:
+                            text_content = entity if isinstance(entity, str) else entity.entity
+                            # Truncate recall to avoid context overflow
+                            short_recall = text_content[:200].replace("\n", " ")
+                            recalled_context_text += f"[Memory (Sim:{score:.2f})]: {short_recall}...\n"
+
+                except Exception as e:
+                    print(f"Recall Error: {e}")
+
+            # --- 2. CONSTRUCT INPUT ---
+            full_input_text = ""
+            if recalled_context_text:
+                full_input_text += f"{recalled_context_text}\n--- CURRENT ---\n"
+            full_input_text += prompt_text
+
+            input_ids = ribosome._tokenize(full_input_text)
             t_in = torch.tensor([input_ids], device=device).long()
 
-            # 2. Prepare Visuals
             v_in = self.attached_image_tensor
-            if v_in is None:
-                # Empty visual tensor (Batch, 1, 768)
-                v_in = torch.zeros(1, 1, 768).to(device)
-
-            # 3. Prepare Audio (Empty for now)
+            if v_in is None: v_in = torch.zeros(1, 1, 768).to(device)
             a_in = torch.zeros(1, 1, 128).to(device)
-
-            # 4. Control Vector (Neutral)
             c_in = torch.zeros(1, 1, 32).to(device)
 
-            # 5. Generation Loop
+            # --- 3. GENERATION ---
             max_new = self.max_tokens.get()
             temp = self.temperature.get()
             top_k = self.top_k.get()
 
-            generated = []
-
-            self.update_queue.put(lambda: self._append_chat("AI", "", "ai"))  # Start AI line
+            generated_ids = []
+            self.update_queue.put(lambda: self._append_chat("AI", "", "ai"))
 
             with torch.no_grad():
-                # Autoregressive Loop
                 curr_t = t_in
-
                 for _ in range(max_new):
                     if self.stop_requested: break
 
-                    # Forward
-                    # model(v, a, t, c)
                     try:
                         logits, _, _ = lobe.model(v_in, a_in, curr_t, c_in)
-                    except RuntimeError:
-                        # Fallback for models without Control Vector
+                    except:
                         logits, _, _ = lobe.model(v_in, a_in, curr_t)
 
-                    # Get last token logits
-                    next_token_logits = logits[:, -1, :]
-
-                    # Sample
+                    next_logits = logits[:, -1, :]
                     if self.do_sample.get():
-                        # Top-K
-                        v, i = torch.topk(next_token_logits, top_k)
-                        next_token_logits[next_token_logits < v[:, [-1]]] = -float('Inf')
-
-                        probs = F.softmax(next_token_logits / temp, dim=-1)
-                        next_token = torch.multinomial(probs, num_samples=1)
+                        v, i = torch.topk(next_logits, top_k)
+                        next_logits[next_logits < v[:, [-1]]] = -float('Inf')
+                        probs = F.softmax(next_logits / temp, dim=-1)
+                        next_token = torch.multinomial(probs, 1)
                     else:
-                        next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+                        next_token = torch.argmax(next_logits, dim=-1, keepdim=True)
 
-                    # Decode Token
                     token_id = next_token.item()
-                    word = self.app.ribosome.decode([token_id])
+                    word = ribosome.decode([token_id])
 
-                    # Stream to UI
                     self.update_queue.put(lambda w=word: self.chat_box.insert(tk.END, w, "content"))
                     self.update_queue.put(lambda: self.chat_box.see(tk.END))
 
-                    # Append
-                    generated.append(token_id)
+                    generated_ids.append(token_id)
                     curr_t = torch.cat([curr_t, next_token], dim=1)
 
-                    # Stop Token Check (50256 is GPT-2 EOS)
                     if token_id == 50256: break
 
             self.update_queue.put(lambda: self.chat_box.insert(tk.END, "\n\n"))
+
+            # --- 4. SAVE EPISODE ---
+            final_response = ribosome.decode(generated_ids)
+            self._save_to_memory(prompt_text, final_response)
             self._clear_attachment()
 
         except Exception as e:
@@ -281,6 +357,3 @@ class Plugin:
         c = self.app.colors
         if hasattr(self, 'chat_box'):
             self.chat_box.config(bg=c["BG_MAIN"], fg=c["FG_TEXT"])
-            self.chat_box.tag_config("content", foreground=c["FG_TEXT"])
-        if hasattr(self, 'txt_input'):
-            self.txt_input.config(bg=c["BG_CARD"], fg=c["FG_TEXT"], insertbackground=c["ACCENT"])

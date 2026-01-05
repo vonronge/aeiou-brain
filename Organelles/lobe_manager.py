@@ -9,7 +9,6 @@ Central authority for loading, saving, and managing neural lobes.
 Abstracts away file I/O, dynamic imports, and hardware configuration.
 """
 
-
 import os
 import torch
 import torch.nn as nn
@@ -18,6 +17,9 @@ import importlib.util
 from dataclasses import dataclass
 from typing import Optional, Any, Dict
 from torch.cuda.amp import GradScaler
+import gc
+import threading
+import time
 
 
 class LobeNotFoundError(Exception): pass
@@ -50,41 +52,30 @@ class Organelle_LobeManager:
         self.genetics_dir = genetics_dir
         self.device = device
         self.ribosome = ribosome
-
         self._active_lobes: Dict[int, LobeHandle] = {}
-
-        # [NEW] Registry: Maps "Display Name" -> "filename.py"
         self._genetics_registry: Dict[str, str] = {}
+        self._save_lock = threading.Lock()  # Prevent concurrent saves of same file
         self.refresh_registry()
 
     def refresh_registry(self):
-        """Scans Genetics folder and builds the name map."""
         self._genetics_registry = {}
         if not os.path.exists(self.genetics_dir): return
-
         files = [f for f in os.listdir(self.genetics_dir) if f.endswith(".py") and not f.startswith("__")]
-
         for f in files:
             try:
-                # We import spec only to read INFO, not initialize the model
                 path = os.path.join(self.genetics_dir, f)
                 spec = importlib.util.spec_from_file_location("temp_dna_scan", path)
                 module = importlib.util.module_from_spec(spec)
                 spec.loader.exec_module(module)
-
                 if hasattr(module, "INFO"):
-                    # Map "MaskedDiffusion-mHC" -> "diffusion_mhc.py"
                     name = module.INFO.get("name", f)
                     self._genetics_registry[name] = f
                 else:
-                    # Fallback to filename
                     self._genetics_registry[f] = f
-
-            except Exception as e:
-                print(f"[LobeManager] Skipping {f}: {e}")
+            except:
+                pass
 
     def list_available_genetics(self):
-        """Returns list of display names for the GUI."""
         return sorted(list(self._genetics_registry.keys()))
 
     def get_lobe(self, lobe_id: int) -> Optional[LobeHandle]:
@@ -92,8 +83,11 @@ class Organelle_LobeManager:
 
     def unload_lobe(self, lobe_id: int):
         if lobe_id in self._active_lobes:
+            try:
+                self._active_lobes[lobe_id].model.cpu()
+            except:
+                pass
             del self._active_lobes[lobe_id]
-            import gc
             gc.collect()
             torch.cuda.empty_cache()
             print(f"[LobeManager] Unloaded Lobe {lobe_id}")
@@ -103,9 +97,11 @@ class Organelle_LobeManager:
         if not os.path.exists(path):
             raise LobeNotFoundError(f"Lobe file not found: {path}")
 
-        print(f"[LobeManager] Loading Lobe {lobe_id}...")
+        print(f"[LobeManager] Loading Lobe {lobe_id} from disk...")
+
         try:
-            checkpoint = torch.load(path, map_location=self.device)
+            # Load to CPU first to prevent OOM
+            checkpoint = torch.load(path, map_location="cpu")
         except Exception as e:
             raise CorruptLobeError(f"Failed to load checkpoint: {e}")
 
@@ -121,24 +117,33 @@ class Organelle_LobeManager:
         if model_type is None:
             model_type = "diffusion" if "diffusion" in genome_name.lower() else "ar"
 
-        # Import using the Registry
         module = self._import_genetics(genome_name)
 
         try:
             config = module.NucleusConfig()
-            model = module.Model(config).to(self.device)
+            model = module.Model(config)
             model.load_state_dict(state_dict, strict=False)
+
+            # VRAM Safety Check
+            param_size = sum(p.nelement() * p.element_size() for p in model.parameters())
+            model_gb = param_size / (1024 ** 3)
+
+            print(f"[LobeManager] Model Size: {model_gb:.2f} GB")
+
+            # Safe limit for 3080 Ti (12GB) is roughly 10GB loaded
+            if model_gb < 10.0 and self.device == "cuda":
+                print("[LobeManager] Moving to GPU...")
+                model = model.to(self.device)
+            else:
+                print(f"[LobeManager] ⚠️ Model large ({model_gb:.2f} GB). Keeping on CPU.")
+
         except Exception as e:
             raise CorruptLobeError(f"Architecture mismatch for {genome_name}: {e}")
 
-        # Optimizer Setup
         optimizer = None
         if "Muon" in genome_name or getattr(config, 'use_muon', False):
-            try:
-                from Genetics.muon import Muon
-                optimizer = Muon(model.parameters(), lr=0.0005, momentum=0.95)
-            except ImportError:
-                optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
+            from Genetics.muon import Muon
+            optimizer = Muon(model.parameters(), lr=0.0005, momentum=0.95)
         else:
             optimizer = torch.optim.AdamW(model.parameters(), lr=2e-5)
 
@@ -163,12 +168,16 @@ class Organelle_LobeManager:
 
     def create_lobe(self, lobe_id: int, genome_name: str) -> LobeHandle:
         print(f"[LobeManager] Genesis: Creating Lobe {lobe_id} with {genome_name}...")
-
-        # Use Registry to resolve name -> file
         module = self._import_genetics(genome_name)
-
         config = module.NucleusConfig()
-        model = module.Model(config).to(self.device)
+
+        model = module.Model(config)
+
+        # Move to GPU if fits
+        param_size = sum(p.nelement() * p.element_size() for p in model.parameters())
+        if (param_size / 1e9) < 10 and self.device == "cuda":
+            model = model.to(self.device)
+
         model_type = "diffusion" if "diffusion" in genome_name.lower() else "ar"
 
         optimizer = None
@@ -191,55 +200,79 @@ class Organelle_LobeManager:
         )
 
         self._active_lobes[lobe_id] = handle
-        self.save_lobe(lobe_id)
+        # Blocking save for initial create is fine
+        self._sync_save(lobe_id)
         return handle
 
-    def save_lobe(self, lobe_id: int, custom_path: str = None) -> str:
+    # --- ASYNC SAVE LOGIC ---
+    def save_lobe(self, lobe_id: int, custom_path: str = None) -> None:
+        """
+        Non-blocking save.
+        1. Clones weights to CPU (Fast).
+        2. Spawns thread to write disk (Slow).
+        """
         handle = self._active_lobes.get(lobe_id)
-        if not handle: raise LobeNotFoundError(f"Lobe {lobe_id} not loaded.")
+        if not handle: return
 
         save_path = custom_path if custom_path else os.path.join(self.lobes_dir, f"brain_lobe_{lobe_id}.pt")
 
+        # 1. Fast Snapshot to CPU RAM
+        # We iterate and .cpu().clone() to ensure thread safety against ongoing training updates
+        try:
+            cpu_state = {k: v.cpu().clone() for k, v in handle.model.state_dict().items()}
+        except Exception as e:
+            print(f"[LobeManager] Snapshot Failed: {e}")
+            return
+
         payload = {
-            "genome": handle.genome,  # Saves "MaskedDiffusion-mHC"
+            "genome": handle.genome,
+            "model_type": handle.model_type,
+            "state_dict": cpu_state
+        }
+
+        # 2. Background Writer
+        def _write_worker():
+            with self._save_lock:
+                try:
+                    temp_path = save_path + ".tmp"
+                    torch.save(payload, temp_path)
+                    if os.path.exists(save_path): os.remove(save_path)
+                    os.rename(temp_path, save_path)
+                    # print(f"[LobeManager] Background Save Complete: Lobe {lobe_id}") # Optional: Reduce spam
+                except Exception as e:
+                    print(f"[LobeManager] Background Save Failed: {e}")
+
+        # 3. Launch
+        t = threading.Thread(target=_write_worker, daemon=True)
+        t.start()
+        print(f"[LobeManager] Snapshot taken. Saving Lobe {lobe_id} in background...")
+
+    def _sync_save(self, lobe_id: int):
+        """Blocking save for initial creation or exit."""
+        handle = self._active_lobes.get(lobe_id)
+        if not handle: return
+        path = os.path.join(self.lobes_dir, f"brain_lobe_{lobe_id}.pt")
+        payload = {
+            "genome": handle.genome,
             "model_type": handle.model_type,
             "state_dict": handle.model.state_dict()
         }
-
-        temp_path = save_path + ".tmp"
-        torch.save(payload, temp_path)
-        if os.path.exists(save_path): os.remove(save_path)
-        os.rename(temp_path, save_path)
-
-        print(f"[LobeManager] Saved Lobe {lobe_id} ({handle.genome}).")
-        return save_path
+        torch.save(payload, path)
+        print(f"[LobeManager] Saved Lobe {lobe_id}.")
 
     def _import_genetics(self, genome_name: str):
-        """
-        Resolves "MaskedDiffusion-mHC" -> "diffusion_mhc.py" using the registry.
-        """
-        # 1. Check Registry
-        filename = self._genetics_registry.get(genome_name)
-
-        # 2. If not in registry, try literal (fallback for old saves or direct filenames)
-        if not filename:
-            filename = f"{genome_name}.py"
-
+        filename = self._genetics_registry.get(genome_name, f"{genome_name}.py")
         path = os.path.join(self.genetics_dir, filename)
-
-        # 3. Final File Existence Check
         if not os.path.exists(path):
-            # Try fuzzy match against directory as last resort
             found = [f for f in os.listdir(self.genetics_dir) if f.lower() == filename.lower()]
             if found:
                 path = os.path.join(self.genetics_dir, found[0])
             else:
-                raise GeneticsNotFoundError(f"Genetics '{genome_name}' not found (tried {filename}).")
-
+                raise GeneticsNotFoundError(f"Genetics '{genome_name}' not found.")
         try:
             spec = importlib.util.spec_from_file_location(genome_name, path)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
             return module
         except Exception as e:
-            raise GeneticsNotFoundError(f"Failed to import '{genome_name}' from {filename}: {e}")
+            raise GeneticsNotFoundError(f"Failed to import '{genome_name}': {e}")

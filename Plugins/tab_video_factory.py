@@ -14,15 +14,27 @@ persistent memory graphs, and local multimodal training.
 """
 
 # FILE: Plugins/tab_video_factory.py
+"""
+AEIOU Brain — Local Multimodal AI Ecosystem
+
+Copyright © 2026 Frederick von Rönge
+GitHub: https://github.com/vonronge/aeiou-brain
+
+The Video Factory (v23.3 "The Director"):
+Extracts training Triplets (Frame, Audio, Text) from video files.
+- Mode A (Semantic): If .srt exists, slices based on dialogue timestamps.
+- Mode B (Raw): If no .srt, slices into fixed-length chunks (10s).
+"""
+
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
 import os
 import cv2
 import threading
 import subprocess
-import uuid
 import queue
-import time
+import re
+import math
 from datetime import datetime
 
 
@@ -44,9 +56,10 @@ class Plugin:
 
         self.input_dir = tk.StringVar(value=default_in)
         self.output_dir = tk.StringVar(value=default_out)
-        self.chunk_len = tk.IntVar(value=10)  # Seconds
-        self.resize_dim = tk.IntVar(value=512)  # px
+        self.chunk_len = tk.IntVar(value=10)  # For Raw Mode
+        self.resize_dim = tk.IntVar(value=512)
         self.skip_existing = tk.BooleanVar(value=True)
+        self.use_srt = tk.BooleanVar(value=True)
 
         self._setup_ui()
         if self.parent:
@@ -60,30 +73,33 @@ class Plugin:
         fr_io.pack(fill="x", padx=10, pady=5)
 
         # Input
-        r1 = ttk.Frame(fr_io)
+        r1 = ttk.Frame(fr_io);
         r1.pack(fill="x", pady=2)
         ttk.Label(r1, text="Video Source:", width=12).pack(side="left")
         ttk.Entry(r1, textvariable=self.input_dir).pack(side="left", fill="x", expand=True, padx=5)
         ttk.Button(r1, text="📂", width=4, command=lambda: self._browse(self.input_dir)).pack(side="left")
 
         # Output
-        r2 = ttk.Frame(fr_io)
+        r2 = ttk.Frame(fr_io);
         r2.pack(fill="x", pady=2)
         ttk.Label(r2, text="Output Root:", width=12).pack(side="left")
         ttk.Entry(r2, textvariable=self.output_dir).pack(side="left", fill="x", expand=True, padx=5)
         ttk.Button(r2, text="📂", width=4, command=lambda: self._browse(self.output_dir)).pack(side="left")
 
         # Settings
-        r3 = ttk.Frame(fr_io)
-        r3.pack(fill="x", pady=5)
-        ttk.Label(r3, text="Chunk Size (s):").pack(side="left")
-        ttk.Spinbox(r3, from_=1, to=60, textvariable=self.chunk_len, width=5).pack(side="left", padx=5)
+        fr_set = ttk.LabelFrame(self.parent, text="Slicing Logic", padding=10)
+        fr_set.pack(fill="x", padx=10, pady=5)
 
-        ttk.Label(r3, text="Resize (px):").pack(side="left", padx=(10, 0))
-        ttk.Spinbox(r3, from_=128, to=1024, increment=64, textvariable=self.resize_dim, width=5).pack(side="left",
-                                                                                                      padx=5)
+        ttk.Checkbutton(fr_set, text="Prefer SRT Subtitles (Semantic Slicing)", variable=self.use_srt).pack(side="left",
+                                                                                                            padx=5)
 
-        ttk.Checkbutton(r3, text="Skip Existing", variable=self.skip_existing).pack(side="left", padx=15)
+        ttk.Label(fr_set, text="|  Fallback Chunk Size (s):").pack(side="left", padx=(15, 5))
+        ttk.Spinbox(fr_set, from_=1, to=60, textvariable=self.chunk_len, width=5).pack(side="left")
+
+        ttk.Label(fr_set, text="|  Resize (px):").pack(side="left", padx=(15, 5))
+        ttk.Spinbox(fr_set, from_=128, to=1024, increment=64, textvariable=self.resize_dim, width=5).pack(side="left")
+
+        ttk.Checkbutton(fr_set, text="Skip Existing", variable=self.skip_existing).pack(side="right", padx=5)
 
         # 2. QUEUE VIEW
         fr_list = ttk.Frame(self.parent)
@@ -93,19 +109,18 @@ class Plugin:
         tb = ttk.Frame(fr_list)
         tb.pack(fill="x", pady=2)
         ttk.Button(tb, text="SCAN FOR VIDEOS", command=self._scan).pack(side="left", fill="x", expand=True)
-        ttk.Label(tb, text=" | ", foreground=self.app.colors["FG_DIM"]).pack(side="left")
         self.lbl_count = ttk.Label(tb, text="0 files found", foreground=self.app.colors["ACCENT"])
-        self.lbl_count.pack(side="left")
+        self.lbl_count.pack(side="left", padx=10)
 
         # Tree
-        cols = ("File", "Size", "Status")
+        cols = ("File", "Mode", "Status")
         self.tree = ttk.Treeview(fr_list, columns=cols, show="headings", height=8)
         self.tree.heading("File", text="Filename")
-        self.tree.heading("Size", text="Size")
+        self.tree.heading("Mode", text="Detected Mode")
         self.tree.heading("Status", text="Status")
 
-        self.tree.column("File", width=400)
-        self.tree.column("Size", width=80, anchor="center")
+        self.tree.column("File", width=350)
+        self.tree.column("Mode", width=100, anchor="center")
         self.tree.column("Status", width=150, anchor="center")
 
         sb = ttk.Scrollbar(fr_list, orient="vertical", command=self.tree.yview)
@@ -124,7 +139,6 @@ class Plugin:
         self.progress = ttk.Progressbar(fr_run, orient="horizontal", mode="determinate")
         self.progress.pack(side="left", fill="x", expand=True, padx=5)
 
-        # Status Bar
         self.lbl_status = ttk.Label(self.parent, text="Ready.", foreground=self.app.colors["FG_DIM"], anchor="w")
         self.lbl_status.pack(fill="x", padx=15, pady=(0, 10))
 
@@ -136,7 +150,6 @@ class Plugin:
     def _log(self, msg, tag="INFO"):
         self.update_queue.put(lambda: self.lbl_status.config(text=msg))
         if self.app.golgi:
-            # Route to Golgi
             level = "INFO"
             if tag == "ERROR":
                 level = "ERROR"
@@ -157,12 +170,49 @@ class Plugin:
     def _update_tree(self, iid, col, val):
         self.update_queue.put(lambda: self.tree.set(iid, col, val))
 
+    def _parse_timestamp(self, ts_str):
+        """Converts '00:00:05,123' to seconds (float)."""
+        try:
+            ts_str = ts_str.strip().replace(',', '.')
+            h, m, s = ts_str.split(':')
+            return int(h) * 3600 + int(m) * 60 + float(s)
+        except:
+            return 0.0
+
+    def _load_srt(self, srt_path):
+        """Parses SRT into list of (start, end, text)."""
+        segments = []
+        if not os.path.exists(srt_path): return []
+
+        try:
+            with open(srt_path, 'r', encoding='utf-8', errors='ignore') as f:
+                content = f.read()
+
+            # Regex for SRT block
+            # 1
+            # 00:00:01,000 --> 00:00:04,000
+            # Text
+            pattern = re.compile(r'(\d+)\n(\d{2}:\d{2}:\d{2},\d{3}) --> (\d{2}:\d{2}:\d{2},\d{3})\n((?:(?!\n\n).)*)',
+                                 re.DOTALL)
+            matches = pattern.findall(content)
+
+            for _, start_str, end_str, text in matches:
+                start = self._parse_timestamp(start_str)
+                end = self._parse_timestamp(end_str)
+                clean_text = text.replace('\n', ' ').strip()
+                # Filter noise
+                if clean_text and not clean_text.startswith('[') and (end - start > 0.5):
+                    segments.append((start, end, clean_text))
+
+            return segments
+        except Exception as e:
+            self._log(f"SRT Parse Error: {e}", "ERROR")
+            return []
+
     # --- SCANNING ---
     def _scan(self):
         folder = self.input_dir.get()
-        if not os.path.exists(folder):
-            messagebox.showerror("Error", "Input folder does not exist.")
-            return
+        if not os.path.exists(folder): return
 
         for i in self.tree.get_children(): self.tree.delete(i)
         self.video_queue = []
@@ -171,18 +221,21 @@ class Plugin:
 
         for root, _, files in os.walk(folder):
             for f in files:
-                _, ext = os.path.splitext(f)
+                base, ext = os.path.splitext(f)
                 if ext.lower() in valid_exts:
-                    full = os.path.join(root, f)
-                    sz = f"{os.path.getsize(full) / (1024 * 1024):.1f} MB"
+                    full_vid = os.path.join(root, f)
+                    full_srt = os.path.join(root, base + ".srt")
 
-                    self.tree.insert("", "end", iid=full, values=(f, sz, "Queued"))
-                    self.video_queue.append(full)
+                    mode = "Raw (Time)"
+                    if self.use_srt.get() and os.path.exists(full_srt):
+                        mode = "Semantic (SRT)"
 
-        self.lbl_count.config(text=f"{len(self.video_queue)} files found")
-        if self.video_queue:
-            self.btn_run.config(state="normal")
-        self._log(f"Scan complete. Found {len(self.video_queue)} videos.")
+                    self.tree.insert("", "end", iid=full_vid, values=(f, mode, "Queued"))
+                    self.video_queue.append((full_vid, full_srt, mode))
+
+        self.lbl_count.config(text=f"{len(self.video_queue)} files")
+        if self.video_queue: self.btn_run.config(state="normal")
+        self._log(f"Scan complete. {len(self.video_queue)} items.")
 
     # --- PROCESSING ---
     def _toggle_run(self):
@@ -203,86 +256,118 @@ class Plugin:
             except:
                 pass
 
-        chunk_s = self.chunk_len.get()
-        dim = self.resize_dim.get()
+        chunk_len = self.chunk_len.get()
+        target_dim = self.resize_dim.get()
+        skip = self.skip_existing.get()
 
-        total = len(self.video_queue)
+        total_files = len(self.video_queue)
 
-        for idx, vid_path in enumerate(self.video_queue):
+        for f_idx, (vid_path, srt_path, mode) in enumerate(self.video_queue):
             if self.stop_requested: break
 
             fname = os.path.basename(vid_path)
-            self._update_tree(vid_path, "Status", "Processing...")
-            self._log(f"Processing {fname} ({idx + 1}/{total})...")
-
-            # Create subfolder for this video? Or flat?
-            # Let's do flat but prefixed
             base_name = os.path.splitext(fname)[0].replace(" ", "_")
+            self._update_tree(vid_path, "Status", "Processing...")
+            self._log(f"Processing {fname} ({f_idx + 1}/{total_files})...")
 
             try:
+                # 1. Determine Segments
+                segments = []  # (start, end, text_content)
+
+                if "SRT" in mode:
+                    srt_data = self._load_srt(srt_path)
+                    if srt_data:
+                        segments = srt_data
+                        self._log(f" > Loaded {len(segments)} subtitles.")
+                    else:
+                        self._log(" > SRT empty/invalid. Fallback to Raw.")
+                        mode = "Raw"  # Fallback logic below
+
+                if "Raw" in mode or not segments:
+                    # Get Duration using CV2
+                    cap = cv2.VideoCapture(vid_path)
+                    fps = cap.get(cv2.CAP_PROP_FPS)
+                    if fps <= 0: fps = 24.0  # Safety
+                    frames = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                    duration = frames / fps
+                    cap.release()
+
+                    # Create fixed chunks
+                    curr = 0
+                    while curr < duration:
+                        end = min(curr + chunk_len, duration)
+                        if end - curr > 1.0:  # Ignore tiny tails
+                            segments.append((curr, end, ""))
+                        curr += chunk_len
+
+                # 2. Process Segments
                 cap = cv2.VideoCapture(vid_path)
                 fps = cap.get(cv2.CAP_PROP_FPS)
-                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
-                duration = frame_count / fps
 
-                # Iterate chunks
-                num_chunks = int(duration // chunk_s)
+                seg_total = len(segments)
 
-                for i in range(num_chunks):
+                for s_idx, (start, end, text) in enumerate(segments):
                     if self.stop_requested: break
 
-                    start_t = i * chunk_s
-                    # Naming scheme: video_T0000.jpg
-                    chunk_id = f"{base_name}_T{int(start_t):04d}"
-                    out_img = os.path.join(out_root, f"{chunk_id}.jpg")
-                    out_aud = os.path.join(out_root, f"{chunk_id}.wav")
+                    # Naming: vidname_p0001 (Sequential for Narrative Mode)
+                    seq_id = str(s_idx + 1).zfill(4)
+                    file_base = f"{base_name}_p{seq_id}"
 
-                    if self.skip_existing.get() and os.path.exists(out_img) and os.path.exists(out_aud):
+                    path_img = os.path.join(out_root, f"{file_base}.jpg")
+                    path_aud = os.path.join(out_root, f"{file_base}.wav")
+                    path_txt = os.path.join(out_root, f"{file_base}.txt")
+
+                    if skip and os.path.exists(path_img) and os.path.exists(path_aud):
                         continue
 
-                    # 1. VISUAL: Grab frame at start_t
-                    frame_id = int(start_t * fps)
-                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_id)
+                    # A. Extract Visual (Midpoint Frame)
+                    midpoint = start + (end - start) / 2
+                    frame_num = int(midpoint * fps)
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_num)
                     ret, frame = cap.read()
 
                     if ret:
                         # Resize
                         h, w = frame.shape[:2]
-                        scale = dim / min(h, w)
-                        nh, nw = int(h * scale), int(w * scale)
+                        s_fac = target_dim / min(h, w)
+                        nh, nw = int(h * s_fac), int(w * s_fac)
                         frame = cv2.resize(frame, (nw, nh))
+                        cv2.imwrite(path_img, frame)
+                    else:
+                        continue  # Skip malformed segments
 
-                        # Center crop to square (optional, but good for training)
-                        # For now, just save resized
-                        cv2.imwrite(out_img, frame)
-
-                    # 2. AUDIO: Extract segment using ffmpeg
-                    # ffmpeg -ss {start} -t {dur} -i {in} -ac 1 -ar 24000 {out}
+                    # B. Extract Audio (FFmpeg)
+                    dur = end - start
                     cmd = [
                         "ffmpeg", "-y", "-v", "error",
-                        "-ss", str(start_t),
-                        "-t", str(chunk_s),
+                        "-ss", str(start),
+                        "-t", str(dur),
                         "-i", vid_path,
-                        "-ac", "1",  # Mono
-                        "-ar", "24000",  # Ribosome standard
-                        out_aud
+                        "-ac", "1", "-ar", "24000",  # Ribosome Standard
+                        path_aud
                     ]
                     subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-                    # Update Progress
-                    pct = ((idx + (i / num_chunks)) / total) * 100
+                    # C. Save Text (Subtitle)
+                    if text:
+                        with open(path_txt, 'w', encoding='utf-8') as f:
+                            f.write(text)
+
+                    # Update Bar
+                    pct = ((s_idx / seg_total) * 100)
                     self.update_queue.put(lambda v=pct: self.progress.configure(value=v))
 
                 cap.release()
-                self._update_tree(vid_path, "Status", "Done")
+                self._update_tree(vid_path, "Status", f"Done ({seg_total})")
 
             except Exception as e:
                 self._update_tree(vid_path, "Status", "Failed")
-                self._log(f"Error on {fname}: {e}", "ERROR")
+                self._log(f"Error: {e}", "ERROR")
+                traceback.print_exc()
 
         self.is_processing = False
         self.update_queue.put(lambda: self.btn_run.config(text="START PROCESSING"))
-        self._log("Batch Processing Complete.", "SUCCESS")
+        self._log("Factory Batch Complete.", "SUCCESS")
         self.update_queue.put(lambda: self.progress.configure(value=0))
 
     def on_theme_change(self):

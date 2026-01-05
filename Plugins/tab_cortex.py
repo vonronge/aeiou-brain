@@ -31,35 +31,46 @@ class Plugin:
         self.status_labels = {}
 
         self._setup_ui()
+
+        # --- AUTO-SCAN ON STARTUP ---
         self.parent.bind("<Visibility>", lambda e: self._refresh_ui())
         self._scan_genetics()
         self._refresh_ui()
 
     def _scan_genetics(self):
         """
-        Asks the Lobe Manager to refresh its registry and returns the list
-        of human-readable names.
+        Asks the Lobe Manager to refresh its registry and populates the
+        combobox with available genetic architectures.
         """
+        if not hasattr(self.app, 'lobe_manager'): return
+
+        # 1. Force Manager to re-read directory
         self.app.lobe_manager.refresh_registry()
+
+        # 2. Get Display Names
         names = self.app.lobe_manager.list_available_genetics()
 
+        # 3. Populate UI
         if hasattr(self, 'combo'):
             self.combo['values'] = names
+            if names:
+                self.combo.current(0)
+                self._on_select(None)  # Trigger metadata load for first item
 
     def _on_select(self, event):
         """
-        Uses Lobe Manager to resolve the display name to the actual module
-        to fetch metadata (Description, VRAM est).
+        Fetches INFO metadata from the selected genetics module.
         """
         name = self.genome_var.get()
         try:
-            # We access the internal import method to ensure we use the
-            # exact same file resolution logic as the Manager.
+            # We use the manager's internal import to get the module without instantiation
             module = self.app.lobe_manager._import_genetics(name)
 
             if hasattr(module, "INFO"):
                 info = module.INFO
-                self.info_text.set(f"{info.get('desc', '')}\nEst. VRAM: {info.get('vram_train', '?')}")
+                desc = info.get('desc', 'No description provided.')
+                vram = info.get('vram_train', 'Unknown')
+                self.info_text.set(f"{desc}\n\n[Est. VRAM Req: {vram}]")
             else:
                 self.info_text.set("No metadata available for this module.")
         except Exception as e:
@@ -91,9 +102,13 @@ class Plugin:
         self.combo.pack(fill="x", pady=5)
         self.combo.bind("<<ComboboxSelected>>", self._on_select)
 
-        info_lbl = ttk.Label(frame_mgmt, textvariable=self.info_text, foreground=self.app.colors["ACCENT"],
-                             justify="left")
-        info_lbl.pack(pady=10, anchor="w")
+        # Info Box
+        info_frame = ttk.Frame(frame_mgmt, style="Card.TFrame")
+        info_frame.pack(fill="x", pady=10)
+        info_lbl = tk.Label(info_frame, textvariable=self.info_text,
+                            bg=self.app.colors["BG_CARD"], fg=self.app.colors["ACCENT"],
+                            justify="left", font=("Segoe UI", int(9 * scale)), wraplength=400)
+        info_lbl.pack(pady=10, padx=10, anchor="w")
 
         # 3. CONTROLS
         frame_pwr = ttk.LabelFrame(frame_mgmt, text="Power & Memory", padding=10)

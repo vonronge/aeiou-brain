@@ -10,25 +10,29 @@ Initializes neural backbones (Retina, MagViT, EnCodec),
 owns the Membrane (I/O), and converts raw data into neural language (Tokens).
 """
 
-
+import fitz
 import torch
 import torch.nn as nn
 from torchvision.models import vit_b_16, ViT_B_16_Weights
 import tiktoken
-import numpy as np
-from PIL import Image
+from PIL import Image, ImageDraw, ImageFont
+import warnings
 import os
-import torchaudio
 import inspect
+import io
+import random
+import glob
+import re
+import zipfile
+import json
+import csv
+import librosa
+import torchaudio
+import numpy as np
+from .thalamus import Organelle_Thalamus
+from .membrane import Organelle_Membrane
 
-# Internal Organelles
-try:
-    from Organelles.thalamus import Organelle_Thalamus
-    from Organelles.membrane import Organelle_Membrane
-except ImportError:
-    pass
-
-# Optional Neural Codecs
+# --- CODEC IMPORTS ---
 try:
     from magvit2_pytorch import MagViT2
 
@@ -43,6 +47,19 @@ try:
 except ImportError:
     HAS_ENCODEC = False
 
+try:
+    import cv2
+
+    HAS_OPENCV = True
+except ImportError:
+    HAS_OPENCV = False
+
+try:
+    fitz.TOOLS.mupdf_display_errors(False)
+except:
+    pass
+warnings.filterwarnings("ignore")
+
 
 class RibosomeConfig:
     image_size = 256
@@ -51,12 +68,19 @@ class RibosomeConfig:
 
 
 class Organelle_Ribosome:
-    def __init__(self, device: str, golgi=None):
+    def __init__(self, device="cuda" if torch.cuda.is_available() else "cpu", golgi=None):
         self.device = device
         self.golgi = golgi
         self.config = RibosomeConfig()
 
         self._log("Initializing Neural Backbones...", "INFO")
+
+        # --- VOCABULARY MAP ---
+        self.text_vocab_base = 50257
+        self.image_vocab_size = 16384
+        self.image_vocab_base = self.text_vocab_base
+        self.audio_vocab_size = 8192
+        self.audio_vocab_base = self.text_vocab_base + self.image_vocab_size
 
         # 1. Text Tokenizer
         try:
@@ -65,7 +89,7 @@ class Organelle_Ribosome:
             self.tokenizer = None
             self._log("Tiktoken failed.", "ERROR")
 
-        # 2. Visual Cortex
+        # 2. Visual Cortex (Retina)
         self.retina = None
         self.visual_transform = None
         try:
@@ -93,17 +117,19 @@ class Organelle_Ribosome:
         self.magvit = None
         if HAS_MAGVIT:
             try:
+                # Calculate spatial tokens
                 spatial_tokens = (self.config.image_size // self.config.patch_size) ** 2
+
                 common_args = {
                     "image_size": self.config.image_size,
                     "dim": 512,
                     "depth": 8,
                     "num_tokens_per_block": spatial_tokens,
                     "channels": 3,
-                    "use_3d": True
+                    "use_3d": True  # Enable Video Mode
                 }
 
-                # Introspect
+                # Introspect constructor to handle library version differences
                 sig = inspect.signature(MagViT2.__init__)
                 params = sig.parameters
 
@@ -119,9 +145,11 @@ class Organelle_Ribosome:
                     self.magvit = MagViT2(num_codes=16384, **common_args).to(device)
 
                 self.magvit.eval()
-                self._log("MagViT-v2 Online.", "SUCCESS")
+                self._log("MagViT-v2 (Video Mode) Online.", "SUCCESS")
             except Exception as e:
                 self._log(f"MagViT Error: {e}", "ERROR")
+        else:
+            self.magvit = None
 
         # 5. EnCodec
         self.encodec = None
@@ -133,7 +161,10 @@ class Organelle_Ribosome:
                 self._log("EnCodec Online.", "SUCCESS")
             except Exception as e:
                 self._log(f"EnCodec Error: {e}", "ERROR")
+        else:
+            self.encodec = None
 
+        # 6. Membrane (I/O)
         self.membrane = Organelle_Membrane(
             device=self.device,
             golgi=self.golgi,
@@ -142,11 +173,6 @@ class Organelle_Ribosome:
             thalamus=self.thalamus,
             transform=self.visual_transform
         )
-
-        self.text_vocab_base = 50257
-        self.image_vocab_base = 50257
-        self.image_vocab_size = 16384
-        self.audio_vocab_base = 50257 + 16384
 
     def _log(self, msg, tag="INFO"):
         if self.golgi:
@@ -157,19 +183,6 @@ class Organelle_Ribosome:
     def set_tokenizer(self, new_tokenizer):
         self.tokenizer = new_tokenizer
 
-    def ingest_packet(self, packet):
-        v_tok, a_tok, text_str, c_emb = self.membrane.build_packet(packet)
-        t_ids = self._tokenize(text_str)
-        t_tok = torch.tensor(t_ids).unsqueeze(0).to(self.device)
-        parts = []
-        if a_tok is not None: parts.append(a_tok)
-        if v_tok is not None: parts.append(v_tok)
-        parts.append(t_tok)
-        full_seq = torch.cat(parts, dim=1)
-        v_feat = torch.zeros(1, 1, 768).to(self.device)
-        a_feat = torch.zeros(1, 1, 128).to(self.device)
-        return v_feat, a_feat, full_seq, c_emb, None
-
     def _tokenize(self, text):
         if not text: return [50256]
         try:
@@ -177,17 +190,114 @@ class Organelle_Ribosome:
                 toks = self.tokenizer.encode(text, add_special_tokens=False)
             else:
                 toks = self.tokenizer.encode(text)
+
             if hasattr(toks, "ids"): toks = toks.ids
             if isinstance(toks, torch.Tensor): toks = toks.tolist()
             return toks[:2048]
         except:
             return [50256]
 
+    # --- CORE PIPELINE ---
+    def ingest_packet(self, packet):
+        """
+        The main entry point. Converts a raw file dictionary into tensors.
+        packet: {'v': path, 'a': path, 't': path/text, 'vid': path}
+        Returns: (v_feat, a_feat, tokens, c_emb, meta)
+        """
+        # Membrane handles the heavy I/O and MagViT/EnCodec tokenization
+        # It returns raw tokens or raw strings.
+        v_tok, a_tok, text_str, c_emb = self.membrane.build_packet(packet)
+
+        # Ribosome handles text tokenization (BPE)
+        t_ids = self._tokenize(text_str)
+        t_tok = torch.tensor(t_ids).unsqueeze(0).to(self.device)
+
+        # Assemble unified sequence: [Audio, Visual, Text]
+        parts = []
+        if a_tok is not None: parts.append(a_tok)
+        if v_tok is not None: parts.append(v_tok)
+        parts.append(t_tok)
+
+        full_seq = torch.cat(parts, dim=1)
+
+        # Extract Dense Features (for Thalamus/Routing)
+        # Note: Ideally Membrane does this, but if not, we do it here if files exist.
+        v_feat = torch.zeros(1, 1, 768).to(self.device)
+        kept_idx = None
+
+        if 'v' in packet and packet['v'] and self.retina:
+            try:
+                img = Image.open(packet['v']).convert('RGB').resize((256, 256))
+                px = self.visual_transform(img).unsqueeze(0).to(self.device)
+                full_vis = self.retina(px)  # [1, 197, 768]
+                v_feat, kept_idx = self.thalamus(full_vis)  # [1, 97, 768]
+            except:
+                pass
+
+        a_feat = torch.zeros(1, 1, 128).to(self.device)
+
+        return v_feat, a_feat, full_seq, c_emb, kept_idx
+
+    # --- ENGRAM EXTRACTION (v23.6 - Dynamic Shape Fix) ---
+    def get_engram(self, path):
+        """
+        Extracts the semantic vector from an image file.
+        Returns: Tensor [1, 768] (Batch, Dim)
+        """
+        if not os.path.exists(path): return None
+        try:
+            # We treat this as a single-item packet to reuse logic
+            # ingest_packet returns: v, a, t, c, meta
+            v, _, _, _, _ = self.ingest_packet({'v': path})
+
+            if v is not None:
+                # v is [1, N, 768]. Mean pool -> [1, 768]
+                vec = v.mean(dim=1)
+
+                # Safety: Ensure 2D [1, D]
+                if vec.ndim == 1: vec = vec.unsqueeze(0)
+
+                return vec
+            return None
+        except Exception as e:
+            print(f"Engram Error: {e}")
+            return None
+
+    def render_text_to_image(self, text):
+        """Renders text to a PIL image for visual memory storage."""
+        img = Image.new('RGB', (512, 512), color=(10, 10, 15))
+        draw = ImageDraw.Draw(img)
+        try:
+            font = ImageFont.truetype("arial.ttf", 16)
+        except:
+            font = ImageFont.load_default()
+
+        margin = 10
+        offset = 10
+        for line in text.split('\n'):
+            words = line.split()
+            current_line = ""
+            for word in words:
+                test_line = current_line + word + " "
+                bbox = draw.textbbox((0, 0), test_line, font=font)
+                if bbox[2] > 500:
+                    draw.text((margin, offset), current_line, font=font, fill=(200, 200, 200))
+                    offset += 20
+                    current_line = word + " "
+                else:
+                    current_line = test_line
+            draw.text((margin, offset), current_line, font=font, fill=(200, 200, 200))
+            offset += 25
+
+        return img
+
+    # --- DECODERS ---
     def decode(self, tokens):
         text_tokens = []
         for t in tokens:
             if isinstance(t, torch.Tensor): t = t.item()
-            if t < self.text_vocab_base: text_tokens.append(t)
+            if t < self.text_vocab_base:
+                text_tokens.append(t)
         try:
             return self.tokenizer.decode(text_tokens)
         except:
@@ -197,23 +307,54 @@ class Organelle_Ribosome:
         if not self.magvit: return None
         indices = torch.tensor(tokens) - self.image_vocab_base
         indices = indices.clamp(0, self.image_vocab_size - 1).to(self.device)
-        side = self.config.image_size // self.config.patch_size
-        target_len = side ** 2
+
+        target_len = 256
         if len(indices) < target_len:
             pad = torch.zeros(target_len - len(indices), device=self.device).long()
             indices = torch.cat([indices, pad])
         else:
             indices = indices[:target_len]
-        indices = indices.view(1, side, side)
+
+        indices = indices.view(1, 16, 16)
         with torch.no_grad():
             if hasattr(self.magvit, 'decode_from_codes'):
                 rec = self.magvit.decode_from_codes(indices)
             else:
                 rec = self.magvit.decode_from_indices(indices)
-        if rec.ndim == 5: rec = rec[:, :, 0, :, :]
+
+        if rec.ndim == 5: rec = rec[:, :, 0, :, :]  # Handle 3D output
         rec = (rec.clamp(-1, 1) + 1) / 2
         rec = rec[0].permute(1, 2, 0).cpu().numpy() * 255
         return Image.fromarray(rec.astype(np.uint8))
+
+    def decode_video_tokens(self, tokens, fps=8):
+        if not self.magvit: return None
+        indices = torch.tensor(tokens) - self.image_vocab_base
+        indices = indices.clamp(0, self.image_vocab_size - 1).to(self.device)
+
+        # Assume fixed T=16 frames for clips
+        target_len = 256 * 16
+        if len(indices) < target_len:
+            indices = torch.cat([indices, torch.zeros(target_len - len(indices), device=self.device).long()])
+
+        indices = indices[:target_len].view(1, 16, 16, 16)  # [B, T, H, W]
+
+        with torch.no_grad():
+            if hasattr(self.magvit, 'decode_from_codes'):
+                rec = self.magvit.decode_from_codes(indices)
+            else:
+                rec = self.magvit.decode_from_indices(indices)
+
+        # [B, C, T, H, W] -> [T, H, W, C]
+        rec = (rec.squeeze(0).permute(1, 2, 3, 0) + 1) * 127.5
+        rec = rec.cpu().numpy().astype(np.uint8)
+
+        out_path = os.path.abspath("temp_gen_video.mp4")
+        writer = cv2.VideoWriter(out_path, cv2.VideoWriter_fourcc(*'mp4v'), fps, (256, 256))
+        for frame in rec:
+            writer.write(cv2.cvtColor(frame, cv2.COLOR_RGB2BGR))
+        writer.release()
+        return out_path
 
     def decode_audio_tokens(self, tokens):
         if not self.encodec: return None

@@ -19,7 +19,7 @@
   "data_dir": "D:\\AEIOU_Brain\\Training_Data",
   "chaos_dir": "D:\\AEIOU_Brain\\Training_Data\\Chaos_Buffer",
   "output_dir": "D:\\AEIOU_Brain\\Training_Data\\Comics_Output",
-  "last_active_lobe": 3,
+  "last_active_lobe": 4,
   "window_geometry": "3840x2019+70+-33",
   "window_state": "zoomed",
   "sidebar_order": [
@@ -32,7 +32,6 @@
     "tab_dream",
     "tab_memory",
     "tab_memory_agent",
-    "tab_symbiosis",
     "tab_factory",
     "tab_council",
     "tab_video_factory",

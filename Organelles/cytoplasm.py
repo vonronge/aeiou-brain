@@ -159,13 +159,22 @@ class Organelle_Cytoplasm:
             for module in lobe.model.modules():
                 if hasattr(module, 'game_loss'): loss_game += module.game_loss()
 
+            # --- SENSORY GROUNDING (L2 on Adapters) ---
+            loss_adapter = torch.tensor(0.0, device=self.device)
+            # Penalize the projection weights for Vision, Audio, Motion
+            for name, p in lobe.model.named_parameters():
+                if 'vis_proj' in name or 'aud_proj' in name or 'mot_proj' in name:
+                    loss_adapter += 1e-3 * p.pow(2).sum()
+
             raw_pred = loss_pred.item()
             raw_game = loss_game.item()
 
             if math.isnan(raw_pred) or math.isinf(raw_pred): return None
 
+            # Add Adapter Loss to total
             final_loss = self._apply_clamps(loss_pred, config.loss_clamp_prediction) + \
-                         self._apply_clamps(loss_game, config.loss_clamp_game)
+                         self._apply_clamps(loss_game, config.loss_clamp_game) + \
+                         loss_adapter
 
         if scaler:
             scaler.scale(final_loss).backward()
@@ -206,13 +215,20 @@ class Organelle_Cytoplasm:
             for module in lobe.model.modules():
                 if hasattr(module, 'game_loss'): loss_game += module.game_loss()
 
+            # --- SENSORY GROUNDING (L2) ---
+            loss_adapter = torch.tensor(0.0, device=self.device)
+            for name, p in lobe.model.named_parameters():
+                if 'vis_proj' in name or 'aud_proj' in name or 'mot_proj' in name:
+                    loss_adapter += 1e-3 * p.pow(2).sum()
+
             raw_recon = loss_recon.item()
             raw_game = loss_game.item()
 
             if math.isnan(raw_recon): return None
 
             final_loss = self._apply_clamps(loss_recon, config.loss_clamp_prediction) + \
-                         self._apply_clamps(loss_game, config.loss_clamp_game)
+                         self._apply_clamps(loss_game, config.loss_clamp_game) + \
+                         loss_adapter
 
         if scaler:
             scaler.scale(final_loss).backward()
@@ -231,8 +247,10 @@ class Organelle_Cytoplasm:
         if not settings: return loss_tensor
         min_v, max_v = settings
         val = loss_tensor.item()
+        # Scale Up if below floor
         if val < min_v:
             return loss_tensor * (min_v / (val + 1e-9))
+        # Scale Down if above ceiling (Surge Protection)
         elif val > max_v:
             return loss_tensor * (max_v / (val + 1e-9))
         return loss_tensor

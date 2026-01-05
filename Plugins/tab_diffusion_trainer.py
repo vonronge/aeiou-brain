@@ -185,12 +185,17 @@ class Plugin:
         self.btn_pause = ttk.Button(r_run, text="PAUSE", command=self._toggle_pause, state="disabled")
         self.btn_pause.pack(side="left", fill="x", expand=True, padx=5)
 
+        # SETTINGS ROW (Updated v24.7)
         r_set = ttk.Frame(fr_ctrl)
         r_set.pack(fill="x", pady=5)
         ttk.Label(r_set, text="Epochs:").pack(side="left")
         ttk.Spinbox(r_set, from_=1, to=1000, textvariable=self.target_epochs, width=5).pack(side="left", padx=5)
+
+        ttk.Label(r_set, text="| Save Every:").pack(side="left", padx=(10, 5))
+        ttk.Entry(r_set, textvariable=self.autosave_interval, width=5).pack(side="left")
+
         ttk.Checkbutton(r_set, text="Narrative Mode (No Shuffle)", variable=self.narrative_mode).pack(side="left",
-                                                                                                      padx=10)
+                                                                                                      padx=15)
 
         # 4. Logs (Applied Font Here)
         fr_log = ttk.LabelFrame(left, text="Director Logs", padding=10)
