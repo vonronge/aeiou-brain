@@ -52,7 +52,7 @@ class Plugin:
 
         # Memory Settings
         self.use_recall = tk.BooleanVar(value=True)
-        self.recall_threshold = tk.DoubleVar(value=0.65)  # Adjustable strength
+        self.recall_threshold = tk.DoubleVar(value=0.65)
 
         self._setup_ui()
         if self.parent:
@@ -63,7 +63,7 @@ class Plugin:
 
         scale = getattr(self.app, 'ui_scale', 1.0)
 
-        # Layout: Chat History (Top), Controls (Bottom)
+        # Layout
         fr_main = ttk.Frame(self.parent)
         fr_main.pack(fill="both", expand=True, padx=10, pady=10)
 
@@ -77,7 +77,6 @@ class Plugin:
                                 state="disabled", padx=10, pady=10)
         self.chat_box.pack(side="left", fill="both", expand=True)
 
-        # Tags
         self.chat_box.tag_config("user", foreground=self.app.colors["ACCENT"],
                                  font=("Segoe UI", int(11 * scale), "bold"))
         self.chat_box.tag_config("ai", foreground=self.app.colors["SUCCESS"],
@@ -101,25 +100,20 @@ class Plugin:
         self.txt_input.bind("<Shift-Return>", lambda e: "break")
         self.txt_input.bind("<Return>", self._on_enter)
 
-        # Controls Row
+        # Controls
         fr_ctrl = ttk.Frame(fr_input)
         fr_ctrl.pack(fill="x")
 
-        # Attachments
         self.btn_img = ttk.Button(fr_ctrl, text="📷 Attach", command=self._attach_image)
         self.btn_img.pack(side="left")
-
         self.lbl_img = ttk.Label(fr_ctrl, text="", foreground=self.app.colors["FG_DIM"])
         self.lbl_img.pack(side="left", padx=5)
 
-        # Generation Params
         ttk.Label(fr_ctrl, text="Temp:").pack(side="left", padx=(15, 0))
         ttk.Entry(fr_ctrl, textvariable=self.temperature, width=5).pack(side="left")
 
-        # Memory Controls
         ttk.Checkbutton(fr_ctrl, text="Visual Recall", variable=self.use_recall).pack(side="left", padx=(15, 5))
 
-        # RECALL STRENGTH SLIDER
         ttk.Label(fr_ctrl, text="Strength:").pack(side="left", padx=(0, 5))
         self.lbl_thresh = ttk.Label(fr_ctrl, text=f"{self.recall_threshold.get():.2f}", width=4)
         self.lbl_thresh.pack(side="left")
@@ -129,14 +123,11 @@ class Plugin:
                               command=lambda v: self.lbl_thresh.config(text=f"{float(v):.2f}"))
         scale_rec.pack(side="left", padx=5)
 
-        # Send Buttons
         self.btn_send = ttk.Button(fr_ctrl, text="SEND ➤", command=self._send_message)
         self.btn_send.pack(side="right")
-
         self.btn_stop = ttk.Button(fr_ctrl, text="STOP", command=self._stop_gen, state="disabled")
         self.btn_stop.pack(side="right", padx=5)
 
-    # --- MEMORY LOGIC ---
     def _save_to_memory(self, user_text, ai_text):
         full_conversation = f"User: {user_text}\nLobe: {ai_text}"
         try:
@@ -169,14 +160,12 @@ class Plugin:
             if self.app.hippocampus:
                 v_feat, _, _, _, _ = self.app.ribosome.ingest_packet({'v': img_path})
                 if v_feat is not None:
-                    # Flatten [1, N, D] -> [1, D] if needed
                     if v_feat.ndim == 3: v_feat = v_feat.mean(dim=1)
                     self.app.hippocampus.add_vector(full_conversation[:50], v_feat)
 
         except Exception as e:
             print(f"Memory Save Error: {e}")
 
-    # --- ACTIONS ---
     def _attach_image(self):
         f = filedialog.askopenfilename(filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.webp")])
         if f:
@@ -226,7 +215,6 @@ class Plugin:
         self.stop_requested = True
         self.btn_stop.config(text="STOPPING...")
 
-    # --- CORE WORKER ---
     def _worker(self, lobe, prompt_text):
         try:
             device = self.app.device
@@ -234,10 +222,8 @@ class Plugin:
 
             # --- 1. VISUAL EPISODIC RECALL ---
             recalled_context_text = ""
-
             if self.use_recall.get() and self.app.hippocampus:
                 try:
-                    # A. Render Prompt
                     if hasattr(ribosome, "render_text_to_image"):
                         prompt_img = ribosome.render_text_to_image(prompt_text)
                     else:
@@ -246,25 +232,19 @@ class Plugin:
 
                     temp_path = os.path.join(self.app.paths["memories"], f"temp_prompt_{uuid.uuid4()}.png")
                     prompt_img.save(temp_path)
-
-                    # B. Extract Engram
                     v_prompt = ribosome.get_engram(temp_path)
                     os.remove(temp_path)
 
-                    # C. Search with Dynamic Threshold
                     thresh = self.recall_threshold.get()
                     hits = self.app.hippocampus.search(v_prompt, top_k=2, threshold=thresh)
 
                     if hits:
                         self.update_queue.put(
                             lambda: self._append_chat("System", f"Recalling {len(hits)} visual memories...", "sys"))
-
                         for score, entity in hits:
                             text_content = entity if isinstance(entity, str) else entity.entity
-                            # Truncate recall to avoid context overflow
                             short_recall = text_content[:200].replace("\n", " ")
                             recalled_context_text += f"[Memory (Sim:{score:.2f})]: {short_recall}...\n"
-
                 except Exception as e:
                     print(f"Recall Error: {e}")
 
@@ -275,56 +255,90 @@ class Plugin:
             full_input_text += prompt_text
 
             input_ids = ribosome._tokenize(full_input_text)
-            t_in = torch.tensor([input_ids], device=device).long()
 
-            v_in = self.attached_image_tensor
-            if v_in is None: v_in = torch.zeros(1, 1, 768).to(device)
-            a_in = torch.zeros(1, 1, 128).to(device)
-            c_in = torch.zeros(1, 1, 32).to(device)
+            # --- 3. GENERATION BRANCH ---
+            # Detect architecture type
+            is_diffusion = hasattr(lobe.model, "generate") and (
+                        lobe.model_type == "diffusion" or "Diffusion" in lobe.genome)
 
-            # --- 3. GENERATION ---
-            max_new = self.max_tokens.get()
-            temp = self.temperature.get()
-            top_k = self.top_k.get()
-
-            generated_ids = []
             self.update_queue.put(lambda: self._append_chat("AI", "", "ai"))
+            final_output = ""
 
-            with torch.no_grad():
-                curr_t = t_in
-                for _ in range(max_new):
-                    if self.stop_requested: break
+            if is_diffusion:
+                # --- DIFFUSION MODE (Block Generation) ---
+                self.update_queue.put(lambda: self._append_chat(None, "(Thinking/Diffusing...)", "sys"))
 
-                    try:
-                        logits, _, _ = lobe.model(v_in, a_in, curr_t, c_in)
-                    except:
-                        logits, _, _ = lobe.model(v_in, a_in, curr_t)
+                # Diffusion generate() returns tokens list
+                # We need to pass tensor to it if prompt is tokenized
+                t_in = torch.tensor([input_ids], device=device).long()
 
-                    next_logits = logits[:, -1, :]
-                    if self.do_sample.get():
-                        v, i = torch.topk(next_logits, top_k)
-                        next_logits[next_logits < v[:, [-1]]] = -float('Inf')
-                        probs = F.softmax(next_logits / temp, dim=-1)
-                        next_token = torch.multinomial(probs, 1)
-                    else:
-                        next_token = torch.argmax(next_logits, dim=-1, keepdim=True)
+                with torch.no_grad():
+                    gen_tokens = lobe.model.generate(
+                        prompt_tokens=t_in,
+                        max_length=self.max_tokens.get() + len(input_ids),  # extend length
+                        steps=30,  # fixed steps for speed
+                        temperature=self.temperature.get()
+                    )
 
-                    token_id = next_token.item()
-                    word = ribosome.decode([token_id])
+                # Diffusion returns full sequence usually (Prompt + New)
+                # Decode all
+                full_text = ribosome.decode(gen_tokens)
 
-                    self.update_queue.put(lambda w=word: self.chat_box.insert(tk.END, w, "content"))
-                    self.update_queue.put(lambda: self.chat_box.see(tk.END))
+                # Strip original prompt to find new content
+                # This is heuristic; diffusion models might rewrite the prompt
+                # Simple check:
+                if full_text.startswith(full_input_text):
+                    final_output = full_text[len(full_input_text):].strip()
+                else:
+                    final_output = full_text  # Return everything if it diverged
 
-                    generated_ids.append(token_id)
-                    curr_t = torch.cat([curr_t, next_token], dim=1)
+                self.update_queue.put(lambda: self.chat_box.insert(tk.END, final_output, "content"))
 
-                    if token_id == 50256: break
+            else:
+                # --- AUTOREGRESSIVE MODE (Streaming) ---
+                t_in = torch.tensor([input_ids], device=device).long()
+                v_in = self.attached_image_tensor if self.attached_image_tensor is not None else torch.zeros(1, 1,
+                                                                                                             768).to(
+                    device)
+                a_in = torch.zeros(1, 1, 128).to(device)
+                c_in = torch.zeros(1, 1, 32).to(device)
+
+                max_new = self.max_tokens.get()
+                temp = self.temperature.get()
+                top_k = self.top_k.get()
+                generated_ids = []
+
+                with torch.no_grad():
+                    curr_t = t_in
+                    for _ in range(max_new):
+                        if self.stop_requested: break
+                        try:
+                            logits, _, _ = lobe.model(v_in, a_in, curr_t, c_in)
+                        except:
+                            logits, _, _ = lobe.model(v_in, a_in, curr_t)
+
+                        next_logits = logits[:, -1, :]
+                        if self.do_sample.get():
+                            v, i = torch.topk(next_logits, top_k)
+                            next_logits[next_logits < v[:, [-1]]] = -float('Inf')
+                            probs = F.softmax(next_logits / temp, dim=-1)
+                            next_token = torch.multinomial(probs, 1)
+                        else:
+                            next_token = torch.argmax(next_logits, dim=-1, keepdim=True)
+
+                        token_id = next_token.item()
+                        word = ribosome.decode([token_id])
+                        self.update_queue.put(lambda w=word: self.chat_box.insert(tk.END, w, "content"))
+                        self.update_queue.put(lambda: self.chat_box.see(tk.END))
+
+                        generated_ids.append(token_id)
+                        curr_t = torch.cat([curr_t, next_token], dim=1)
+                        if token_id == 50256: break
+
+                final_output = ribosome.decode(generated_ids)
 
             self.update_queue.put(lambda: self.chat_box.insert(tk.END, "\n\n"))
-
-            # --- 4. SAVE EPISODE ---
-            final_response = ribosome.decode(generated_ids)
-            self._save_to_memory(prompt_text, final_response)
+            self._save_to_memory(prompt_text, final_output)
             self._clear_attachment()
 
         except Exception as e:

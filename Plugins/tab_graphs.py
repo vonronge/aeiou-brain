@@ -32,6 +32,12 @@ class Plugin:
         self.auto_refresh = tk.BooleanVar(value=True)
         self.max_history = tk.IntVar(value=50)  # View window size
 
+        # Layout Constants
+        self.MARGIN_LEFT = 65  # Increased to prevent text clipping
+        self.MARGIN_RIGHT = 20
+        self.MARGIN_TOP = 20
+        self.MARGIN_BOTTOM = 30
+
         self._setup_ui()
 
         # Start Animation Loop
@@ -128,47 +134,55 @@ class Plugin:
             return None, None
 
     # --- DRAWING HELPERS ---
-    def _get_coords(self, data, width, height, min_val, max_val, offset_x=40):
+    def _get_coords(self, data, width, height, min_val, max_val):
         if len(data) < 2: return []
 
         count = len(data)
-        x_step = (width - offset_x - 10) / (count - 1)
+        # Use class constants for margins
+        draw_w = width - self.MARGIN_LEFT - self.MARGIN_RIGHT
+        draw_h = height - self.MARGIN_TOP - self.MARGIN_BOTTOM
+
+        x_step = draw_w / (count - 1)
         y_range = max_val - min_val if (max_val - min_val) > 1e-6 else 1.0
-        draw_h = height - 40  # Padding
 
         coords = []
         for i, val in enumerate(data):
-            x = offset_x + i * x_step
+            x = self.MARGIN_LEFT + i * x_step
             # Normalize Y (0 at bottom)
             norm_y = (val - min_val) / y_range
             # Flip for Canvas (0 at top)
-            y = height - 20 - (norm_y * draw_h)
+            y = (height - self.MARGIN_BOTTOM) - (norm_y * draw_h)
             coords.extend([x, y])
 
         return coords
 
-    def _draw_axes(self, canvas, width, height, min_val, max_val, h_lines=6, offset_x=40):
+    def _draw_axes(self, canvas, width, height, min_val, max_val, h_lines=6):
         canvas.delete("grid")
         y_range = max_val - min_val
-        draw_h = height - 40
 
-        font_spec = ("Consolas", int(8 * getattr(self.app, 'ui_scale', 1.0)))
+        draw_h = height - self.MARGIN_TOP - self.MARGIN_BOTTOM
+        bottom_y = height - self.MARGIN_BOTTOM
+        left_x = self.MARGIN_LEFT
+        right_x = width - self.MARGIN_RIGHT
+
+        font_spec = ("Consolas", int(9 * getattr(self.app, 'ui_scale', 1.0)))
 
         # Horizontal Grid Lines
         for i in range(h_lines + 1):
             ratio = i / h_lines
             val = min_val + (ratio * y_range)
-            y = height - 20 - (ratio * draw_h)
+            y = bottom_y - (ratio * draw_h)
 
             color = self.app.colors["BORDER"]
-            canvas.create_line(offset_x, y, width, y, fill=color, dash=(2, 2), tags="grid")
-            canvas.create_text(offset_x - 5, y, text=f"{val:.2f}", fill=self.app.colors["FG_DIM"],
+            canvas.create_line(left_x, y, right_x, y, fill=color, dash=(2, 2), tags="grid")
+            # Text Anchor East (Right aligned to margin)
+            canvas.create_text(left_x - 8, y, text=f"{val:.3f}", fill=self.app.colors["FG_DIM"],
                                anchor="e", font=font_spec, tags="grid")
 
         # Vertical Axes
-        canvas.create_line(offset_x, 20, offset_x, height - 20, fill=self.app.colors["FG_DIM"], width=1, tags="grid")
-        canvas.create_line(offset_x, height - 20, width, height - 20, fill=self.app.colors["FG_DIM"], width=1,
+        canvas.create_line(left_x, self.MARGIN_TOP, left_x, bottom_y, fill=self.app.colors["FG_DIM"], width=1,
                            tags="grid")
+        canvas.create_line(left_x, bottom_y, right_x, bottom_y, fill=self.app.colors["FG_DIM"], width=1, tags="grid")
 
     # --- MAIN UPDATE LOOP ---
     def _update_graphs(self):
@@ -237,7 +251,7 @@ class Plugin:
             # Legend
             font_spec = ("Segoe UI", int(9 * getattr(self.app, 'ui_scale', 1.0)), "bold")
             info = f"Last {len(active_epochs)} Epochs"
-            self.canv_main.create_text(w - 10, 10, text=f"Reconstruction (Red)\nGame/Vis (Blue)\n{info}",
+            self.canv_main.create_text(w - 20, self.MARGIN_TOP, text=f"Reconstruction (Red)\nGame/Vis (Blue)\n{info}",
                                        fill=self.app.colors["FG_TEXT"], anchor="ne", font=font_spec, tags="text")
 
         # 3. DRAW AUX GRAPH (Power Law Projection)
@@ -274,16 +288,18 @@ class Plugin:
                         total_x_range = future_ep - epoch_indices[0]
                         if total_x_range == 0: total_x_range = 1
 
-                        x_step_pl = (w_aux - 50) / total_x_range
+                        draw_w = w_aux - self.MARGIN_LEFT - self.MARGIN_RIGHT
+                        draw_h = h_aux - self.MARGIN_TOP - self.MARGIN_BOTTOM
+
+                        x_step_pl = draw_w / total_x_range
                         y_range_pl = max_e - min_e
                         if y_range_pl < 1e-6: y_range_pl = 1.0
-                        draw_h_pl = h_aux - 40
 
                         for tx, ty in zip(trend_x, trend_y):
-                            cx = 40 + (tx - epoch_indices[0]) * x_step_pl
+                            cx = self.MARGIN_LEFT + (tx - epoch_indices[0]) * x_step_pl
                             # Clamp Y to view
                             ty_c = max(min_e, min(max_e, ty))
-                            cy = h_aux - 20 - ((ty_c - min_e) / y_range_pl * draw_h_pl)
+                            cy = (h_aux - self.MARGIN_BOTTOM) - ((ty_c - min_e) / y_range_pl * draw_h)
                             pl_coords.extend([cx, cy])
 
                         pl_label = f"L ≈ {a:.3f}·e^({b:.3f})"
@@ -292,21 +308,23 @@ class Plugin:
                 if pl_coords:
                     self.canv_aux.create_line(pl_coords, fill=self.app.colors["WARN"], width=2, dash=(4, 2),
                                               tags="line")
-                    self.canv_aux.create_text(w_aux - 10, 20, text=pl_label, fill=self.app.colors["WARN"],
+                    self.canv_aux.create_text(w_aux - 20, self.MARGIN_TOP, text=pl_label, fill=self.app.colors["WARN"],
                                               anchor="ne", font=("Consolas", 9), tags="text")
 
-                # Draw Actual Epoch Points (Overlay on top of projection)
-                # Recalculate X-scale based on the Future projection (so they align)
+                # Draw Actual Epoch Points
                 total_x_range = future_ep - epoch_indices[0]
                 if total_x_range == 0: total_x_range = 1
-                x_step_act = (w_aux - 50) / total_x_range
+
+                draw_w = w_aux - self.MARGIN_LEFT - self.MARGIN_RIGHT
+                draw_h = h_aux - self.MARGIN_TOP - self.MARGIN_BOTTOM
+
+                x_step_act = draw_w / total_x_range
                 y_range_act = max_e - min_e
-                draw_h_act = h_aux - 40
 
                 act_coords = []
                 for ep, val in zip(epoch_indices, epoch_avgs):
-                    cx = 40 + (ep - epoch_indices[0]) * x_step_act
-                    cy = h_aux - 20 - ((val - min_e) / y_range_act * draw_h_act)
+                    cx = self.MARGIN_LEFT + (ep - epoch_indices[0]) * x_step_act
+                    cy = (h_aux - self.MARGIN_BOTTOM) - ((val - min_e) / y_range_act * draw_h)
                     act_coords.extend([cx, cy])
 
                 if len(act_coords) > 2:
