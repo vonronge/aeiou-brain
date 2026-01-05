@@ -14,22 +14,13 @@ persistent memory graphs, and local multimodal training.
 """
 
 import tkinter as tk
-from tkinter import ttk, font
-import threading
+from tkinter import ttk, filedialog, messagebox
 import torch
 import torch.nn.functional as F
-from PIL import ImageTk, Image
+import threading
+import queue
 import os
-import traceback
-import time
-
-try:
-    import pygame
-
-    pygame.mixer.init()
-    HAS_AUDIO = True
-except:
-    HAS_AUDIO = False
+from PIL import Image, ImageTk
 
 
 class Plugin:
@@ -37,261 +28,259 @@ class Plugin:
         self.parent = parent
         self.app = app
         self.name = "Playground"
+
         self.is_generating = False
-        self.image_refs = []  # Keep references to prevent GC
+        self.stop_requested = False
+        self.update_queue = queue.Queue()
 
-        # --- PARAMS ---
-        self.temp = tk.DoubleVar(value=0.9)
-        self.top_k = tk.IntVar(value=100)
-        self.max_tokens = tk.IntVar(value=1024)
-        self.steps = tk.IntVar(value=18)
+        # Conversation History
+        self.history = []
+        self.attached_image_path = None
+        self.attached_image_tensor = None
 
-        # --- UI STATE ---
-        self.progress_var = tk.StringVar(value="")
+        # --- SETTINGS ---
+        self.temperature = tk.DoubleVar(value=0.8)
+        self.top_k = tk.IntVar(value=50)
+        self.max_tokens = tk.IntVar(value=100)
+        self.do_sample = tk.BooleanVar(value=True)
 
         self._setup_ui()
+        if self.parent:
+            self.parent.after(100, self._process_gui_queue)
 
     def _setup_ui(self):
-        # Main split
-        panel = ttk.PanedWindow(self.parent, orient="vertical")
-        panel.pack(fill="both", expand=True, padx=5, pady=5)
+        if self.parent is None: return
 
-        # 1. CHAT AREA
-        chat_frame = ttk.Frame(panel)
-        panel.add(chat_frame, weight=1)
+        scale = getattr(self.app, 'ui_scale', 1.0)
 
-        sb = ttk.Scrollbar(chat_frame)
-        sb.pack(side="right", fill="y")
+        # Layout: Chat History (Top), Controls (Bottom)
+        fr_main = ttk.Frame(self.parent)
+        fr_main.pack(fill="both", expand=True, padx=10, pady=10)
 
-        self.chat_box = tk.Text(chat_frame, font=("Consolas", int(11 * getattr(self.app, 'ui_scale', 1.0))), bg=self.app.colors["BG_CARD"],
-                                fg=self.app.colors["FG_TEXT"], wrap="word", padx=10, pady=10,
-                                yscrollcommand=sb.set, borderwidth=0, highlightthickness=0)
+        # 1. CHAT HISTORY
+        fr_hist = ttk.Frame(fr_main)
+        fr_hist.pack(fill="both", expand=True)
+
+        chat_font = ("Segoe UI", int(11 * scale))
+        self.chat_box = tk.Text(fr_hist, font=chat_font, wrap="word",
+                                bg=self.app.colors["BG_MAIN"], fg=self.app.colors["FG_TEXT"],
+                                state="disabled", padx=10, pady=10)
         self.chat_box.pack(side="left", fill="both", expand=True)
-        sb.config(command=self.chat_box.yview)
 
-        # Tags
-        self.chat_box.tag_config("user", foreground="#A8C7FA", justify="right", rmargin=10)
-        self.chat_box.tag_config("brain", foreground="#E3E3E3", justify="left", lmargin1=10, lmargin2=10)
-        self.chat_box.tag_config("system", foreground="#8e9198", font=("Segoe UI", 9, "italic"), justify="center")
-        self.chat_box.tag_config("error", foreground="#F28B82", justify="center")
-        self.chat_box.tag_config("media_placeholder", foreground="#FDD663", font=("Segoe UI", 9, "bold"),
-                                 justify="center")
-        self.chat_box.tag_config("media", justify="center")
+        # Tags for coloring
+        self.chat_box.tag_config("user", foreground=self.app.colors["ACCENT"],
+                                 font=("Segoe UI", int(11 * scale), "bold"))
+        self.chat_box.tag_config("ai", foreground=self.app.colors["SUCCESS"],
+                                 font=("Segoe UI", int(11 * scale), "bold"))
+        self.chat_box.tag_config("sys", foreground=self.app.colors["FG_DIM"],
+                                 font=("Segoe UI", int(10 * scale), "italic"))
+        self.chat_box.tag_config("content", foreground=self.app.colors["FG_TEXT"])
 
-        # 2. CONTROLS
-        ctrl = ttk.Frame(panel, padding=5)
-        panel.add(ctrl, weight=0)
+        sb = ttk.Scrollbar(fr_hist, command=self.chat_box.yview)
+        sb.pack(side="right", fill="y")
+        self.chat_box.config(yscrollcommand=sb.set)
 
-        # Input
-        input_frame = ttk.Frame(ctrl)
-        input_frame.pack(fill="x", pady=(0, 5))
+        # 2. INPUT AREA
+        fr_input = ttk.LabelFrame(fr_main, text="Input Signal", padding=10)
+        fr_input.pack(fill="x", pady=(10, 0))
 
-        self.input_var = tk.StringVar()
-        self.entry = ttk.Entry(input_frame, textvariable=self.input_var, font=("Segoe UI", 10))
-        self.entry.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        self.entry.bind("<Return>", lambda e: self._on_send())
+        # Text Input
+        self.txt_input = tk.Text(fr_input, height=3, font=chat_font,
+                                 bg=self.app.colors["BG_CARD"], fg=self.app.colors["FG_TEXT"],
+                                 insertbackground=self.app.colors["ACCENT"])
+        self.txt_input.pack(fill="x", side="top", pady=(0, 5))
+        self.txt_input.bind("<Shift-Return>", lambda e: "break")  # Newline
+        self.txt_input.bind("<Return>", self._on_enter)
 
-        self.btn_send = ttk.Button(input_frame, text="SEND", command=self._on_send)
-        self.btn_send.pack(side="left")
+        # Controls Row
+        fr_ctrl = ttk.Frame(fr_input)
+        fr_ctrl.pack(fill="x")
 
-        # Settings
-        sets = ttk.Frame(ctrl)
-        sets.pack(fill="x")
+        # Attachments
+        self.btn_img = ttk.Button(fr_ctrl, text="📷 Attach Image", command=self._attach_image)
+        self.btn_img.pack(side="left")
 
-        def add_slider(lbl, var, min_v, max_v):
-            f = ttk.Frame(sets)
-            f.pack(side="left", padx=5)
-            ttk.Label(f, text=lbl, font=("Segoe UI", 8)).pack(side="left")
-            ttk.Scale(f, from_=min_v, to=max_v, variable=var, orient="horizontal", length=80).pack(side="left", padx=5)
+        self.lbl_img = ttk.Label(fr_ctrl, text="", foreground=self.app.colors["FG_DIM"])
+        self.lbl_img.pack(side="left", padx=5)
 
-        add_slider("Temp:", self.temp, 0.1, 2.0)
-        add_slider("Top-K:", self.top_k, 0, 200)
-        add_slider("MaxLen:", self.max_tokens, 256, 4096)
+        # Params
+        ttk.Label(fr_ctrl, text="Temp:").pack(side="left", padx=(15, 0))
+        ttk.Entry(fr_ctrl, textvariable=self.temperature, width=5).pack(side="left")
 
-        self.diff_frame = ttk.Frame(sets)
-        add_slider("Steps:", self.steps, 4, 64)
-        self.diff_frame.pack_forget()
+        ttk.Label(fr_ctrl, text="Len:").pack(side="left", padx=(5, 0))
+        ttk.Entry(fr_ctrl, textvariable=self.max_tokens, width=5).pack(side="left")
 
-        # Status Bar
-        self.lbl_status = ttk.Label(ctrl, textvariable=self.progress_var, foreground=self.app.colors["ACCENT"],
-                                    font=("Segoe UI", 9))
-        self.lbl_status.pack(pady=(5, 0))
+        # Buttons
+        self.btn_send = ttk.Button(fr_ctrl, text="SEND ➤", command=self._send_message)
+        self.btn_send.pack(side="right")
 
-    def _detect_diffusion(self):
-        brain = self.app.lobes.get(self.app.active_lobe.get())
-        is_diff = (brain is not None and hasattr(brain, 'timestep_emb'))
-        if is_diff:
-            self.diff_frame.pack(side="left", padx=10)
-        else:
-            self.diff_frame.pack_forget()
+        self.btn_stop = ttk.Button(fr_ctrl, text="STOP", command=self._stop_gen, state="disabled")
+        self.btn_stop.pack(side="right", padx=5)
 
-    # --- OUTPUT HELPERS ---
-    def _print(self, text, tag="brain"):
-        self.chat_box.insert(tk.END, f"\n{text}\n", tag)
+    # --- ACTIONS ---
+    def _attach_image(self):
+        f = filedialog.askopenfilename(filetypes=[("Images", "*.png;*.jpg;*.jpeg;*.webp")])
+        if f:
+            self.attached_image_path = f
+            self.lbl_img.config(text=f"[{os.path.basename(f)}]")
+            # Pre-process immediately via Ribosome
+            try:
+                # We create a dummy packet to use Membrane/Ribosome logic
+                packet = {'v': f, 'type': 'single'}
+                # Returns (v_feat, a_feat, tokens, c_emb, meta)
+                v, _, _, _, _ = self.app.ribosome.ingest_packet(packet)
+                self.attached_image_tensor = v  # Keep the dense features
+            except Exception as e:
+                messagebox.showerror("Error", f"Failed to process image: {e}")
+                self._clear_attachment()
+
+    def _clear_attachment(self):
+        self.attached_image_path = None
+        self.attached_image_tensor = None
+        self.lbl_img.config(text="")
+
+    def _on_enter(self, event):
+        if not self.is_generating:
+            self._send_message()
+        return "break"
+
+    def _send_message(self):
+        text = self.txt_input.get("1.0", tk.END).strip()
+        if not text and not self.attached_image_path: return
+
+        # 1. Verify Lobe
+        active_id = self.app.active_lobe.get()
+        lobe = self.app.lobe_manager.get_lobe(active_id)
+        if not lobe:
+            self._append_chat("System", "No Lobe Loaded. Please activate a model.", "sys")
+            return
+
+        # 2. Update UI
+        self.txt_input.delete("1.0", tk.END)
+        self._append_chat("User", text, "user")
+        if self.attached_image_path:
+            self._append_chat("System", f"[Image Attached: {os.path.basename(self.attached_image_path)}]", "sys")
+
+        # 3. Start Inference
+        self.is_generating = True
+        self.stop_requested = False
+        self.btn_send.config(state="disabled")
+        self.btn_stop.config(state="normal")
+
+        threading.Thread(target=self._worker, args=(lobe, text), daemon=True).start()
+
+    def _stop_gen(self):
+        self.stop_requested = True
+        self.btn_stop.config(text="STOPPING...")
+
+    # --- INFERENCE WORKER ---
+    def _worker(self, lobe, prompt_text):
+        try:
+            device = self.app.device
+
+            # 1. Tokenize Text (Ribosome)
+            # The ribosome gives us a list of ints. We need a tensor.
+            input_ids = self.app.ribosome._tokenize(prompt_text)
+            t_in = torch.tensor([input_ids], device=device).long()
+
+            # 2. Prepare Visuals
+            v_in = self.attached_image_tensor
+            if v_in is None:
+                # Empty visual tensor (Batch, 1, 768)
+                v_in = torch.zeros(1, 1, 768).to(device)
+
+            # 3. Prepare Audio (Empty for now)
+            a_in = torch.zeros(1, 1, 128).to(device)
+
+            # 4. Control Vector (Neutral)
+            c_in = torch.zeros(1, 1, 32).to(device)
+
+            # 5. Generation Loop
+            max_new = self.max_tokens.get()
+            temp = self.temperature.get()
+            top_k = self.top_k.get()
+
+            generated = []
+
+            self.update_queue.put(lambda: self._append_chat("AI", "", "ai"))  # Start AI line
+
+            with torch.no_grad():
+                # Autoregressive Loop
+                curr_t = t_in
+
+                for _ in range(max_new):
+                    if self.stop_requested: break
+
+                    # Forward
+                    # model(v, a, t, c)
+                    try:
+                        logits, _, _ = lobe.model(v_in, a_in, curr_t, c_in)
+                    except RuntimeError:
+                        # Fallback for models without Control Vector
+                        logits, _, _ = lobe.model(v_in, a_in, curr_t)
+
+                    # Get last token logits
+                    next_token_logits = logits[:, -1, :]
+
+                    # Sample
+                    if self.do_sample.get():
+                        # Top-K
+                        v, i = torch.topk(next_token_logits, top_k)
+                        next_token_logits[next_token_logits < v[:, [-1]]] = -float('Inf')
+
+                        probs = F.softmax(next_token_logits / temp, dim=-1)
+                        next_token = torch.multinomial(probs, num_samples=1)
+                    else:
+                        next_token = torch.argmax(next_token_logits, dim=-1, keepdim=True)
+
+                    # Decode Token
+                    token_id = next_token.item()
+                    word = self.app.ribosome.decode([token_id])
+
+                    # Stream to UI
+                    self.update_queue.put(lambda w=word: self.chat_box.insert(tk.END, w, "content"))
+                    self.update_queue.put(lambda: self.chat_box.see(tk.END))
+
+                    # Append
+                    generated.append(token_id)
+                    curr_t = torch.cat([curr_t, next_token], dim=1)
+
+                    # Stop Token Check (50256 is GPT-2 EOS)
+                    if token_id == 50256: break
+
+            self.update_queue.put(lambda: self.chat_box.insert(tk.END, "\n\n"))
+            self._clear_attachment()
+
+        except Exception as e:
+            self.update_queue.put(lambda: self._append_chat("Error", str(e), "sys"))
+            print(e)
+
+        self.is_generating = False
+        self.update_queue.put(lambda: self.btn_send.config(state="normal"))
+        self.update_queue.put(lambda: self.btn_stop.config(state="disabled", text="STOP"))
+
+    def _append_chat(self, sender, text, tag):
+        self.chat_box.config(state="normal")
+        if sender:
+            self.chat_box.insert(tk.END, f"{sender}: ", tag)
+        self.chat_box.insert(tk.END, f"{text}\n", "content")
+        self.chat_box.config(state="disabled")
         self.chat_box.see(tk.END)
 
-    def _print_image(self, pil_img):
-        try:
-            max_w, max_h = 512, 512
-            pil_img.thumbnail((max_w, max_h))
-            photo = ImageTk.PhotoImage(pil_img)
-            self.image_refs.append(photo)
-
-            self.chat_box.insert(tk.END, "\n", "media")
-            self.chat_box.image_create(tk.END, image=photo, padx=10, pady=10)
-            self.chat_box.insert(tk.END, "\n", "media")
-            self.chat_box.see(tk.END)
-        except Exception as e:
-            self._print(f"[Image Render Error: {e}]", "error")
-
-    # --- GENERATION ---
-    def _on_send(self):
-        if self.is_generating: return
-        prompt = self.input_var.get().strip()
-        if not prompt: return
-
-        self.input_var.set("")
-        self._print(f"> {prompt}", "user")
-
-        self.is_generating = True
-        self.btn_send.config(state="disabled")
-        self._detect_diffusion()
-        self.progress_var.set("Waiting for GPU...")
-
-        threading.Thread(target=self._run_generation, args=(prompt,), daemon=True).start()
-
-    def _run_generation(self, prompt):
-        try:
-            lobe_id = self.app.active_lobe.get()
-            brain = self.app.lobes[lobe_id]
-            ribosome = self.app.ribosome
-
-            if not brain: raise Exception("No Brain Loaded.")
-
-            prompt_ids = ribosome._tokenize(prompt)
-
-            brain.eval()
-            tokens = []
-
-            with self.app.gpu_lock:
-                with torch.no_grad():
-                    if hasattr(brain, 'timestep_emb'):
-                        steps = self.steps.get()
-                        for i in range(1, steps + 1):
-                            tokens = brain.generate(
-                                prompt_tokens=prompt_ids,
-                                max_length=self.max_tokens.get(),
-                                steps=i,
-                                temperature=self.temp.get(),
-                                top_k=self.top_k.get()
-                            )
-                            if i % 2 == 0 or i == steps:
-                                preview = ribosome.decode(tokens[:50]) + "..."
-                                self.parent.after(0, lambda s=i, p=preview: self.progress_var.set(
-                                    f"Diffusing {s}/{steps}: {p}"))
-                    else:
-                        t = torch.tensor(prompt_ids, device=self.app.device).unsqueeze(0)
-                        v = torch.zeros(1, 1, 768).to(self.app.device)
-                        a = torch.zeros(1, 1, 128).to(self.app.device)
-
-                        for i in range(200):
-                            self.parent.after(0, lambda c=i: self.progress_var.set(f"Generating token {c}..."))
-                            logits, _, _ = brain(v, a, t)
-                            next_tok = torch.multinomial(F.softmax(logits[:, -1, :] / self.temp.get(), dim=-1), 1)
-                            t = torch.cat([t, next_tok], dim=1)
-                            if next_tok.item() == 50256: break
-                        tokens = t[0].tolist()
-
-            self.parent.after(0, lambda: self.progress_var.set("Decoding content..."))
-
-            # Text
-            text_out = ribosome.decode(tokens)
-            if text_out.startswith(prompt): text_out = text_out[len(prompt):].strip()
-            if text_out.strip():
-                self.parent.after(0, lambda t=text_out: self._print(t, "brain"))
-
-            # Multimedia
-            self._scan_and_render_media(tokens, ribosome)
-
-        except Exception as e:
-            traceback.print_exc()
-            self.parent.after(0, lambda m=str(e): self._print(f"Error: {m}", "error"))
-        finally:
-            self.is_generating = False
-            self.parent.after(0, lambda: self.btn_send.config(state="normal"))
-            self.parent.after(0, lambda: self.progress_var.set("Ready."))
-
-    def _scan_and_render_media(self, tokens, ribosome):
-        """Scans tokens for media blocks and attempts to render them."""
-        img_buffer = []
-        aud_buffer = []
-
-        side = ribosome.config.image_size // ribosome.config.patch_size
-        img_tokens_needed = side ** 2
-
-        for tok in tokens:
-            val = tok.item() if torch.is_tensor(tok) else tok
-
-            # --- VISUAL TOKENS ---
-            if val >= ribosome.image_vocab_base and val < ribosome.audio_vocab_base:
-                img_buffer.append(val)
-                # Feedback for accumulating buffer
-                if len(img_buffer) % 50 == 0:
-                    self.parent.after(0, lambda: self.progress_var.set("Receiving Visual Data..."))
-
-                # Full Image Check
-                if len(img_buffer) == img_tokens_needed:
-                    try:
-                        img = ribosome.decode_image_tokens(img_buffer)
-                        if img:
-                            self.parent.after(0, lambda i=img: self._print_image(i))
-                        else:
-                            raise Exception("Empty image")
-                    except Exception as e:
-                        # RENDER FAILED: Show placeholder
-                        self.parent.after(0, lambda: self._print(f"[Image Generation Failed: {len(img_buffer)} tokens]",
-                                                                 "media_placeholder"))
-                    img_buffer = []
-
-            # --- AUDIO TOKENS ---
-            elif val >= ribosome.audio_vocab_base:
-                aud_buffer.append(val)
-                if len(aud_buffer) % 100 == 0:
-                    self.parent.after(0, lambda: self.progress_var.set("Receiving Audio Data..."))
-
-                if len(aud_buffer) >= 1000:
-                    self._flush_audio(aud_buffer, ribosome)
-                    aud_buffer = []
-
-        # Flush leftovers
-        if aud_buffer:
-            self._flush_audio(aud_buffer, ribosome)
-
-        # If image buffer has stragglers (incomplete image)
-        if len(img_buffer) > 0:
-            self.parent.after(0, lambda: self._print(
-                f"[Incomplete Image Data: {len(img_buffer)}/{img_tokens_needed} tokens]", "media_placeholder"))
-
-    def _flush_audio(self, buffer, ribosome):
-        try:
-            wav = ribosome.decode_audio_tokens(buffer)
-            if wav and HAS_AUDIO:
-                self.parent.after(0, lambda: self._print("[Audio Clip Playing...]", "system"))
-                threading.Thread(target=self._play_audio, args=(wav,), daemon=True).start()
-            else:
-                raise Exception("Audio decode failed")
-        except:
-            self.parent.after(0, lambda: self._print("[Audio Generation Failed]", "media_placeholder"))
-
-    def _play_audio(self, wav_path):
-        try:
-            while pygame.mixer.music.get_busy(): time.sleep(0.1)
-            pygame.mixer.music.load(wav_path)
-            pygame.mixer.music.play()
-        except:
-            pass
+    def _process_gui_queue(self):
+        while not self.update_queue.empty():
+            try:
+                fn = self.update_queue.get_nowait()
+                fn()
+            except:
+                break
+        if self.parent:
+            self.parent.after(50, self._process_gui_queue)
 
     def on_theme_change(self):
         c = self.app.colors
         if hasattr(self, 'chat_box'):
-            self.chat_box.config(bg=c["BG_CARD"], fg=c["FG_TEXT"])
+            self.chat_box.config(bg=c["BG_MAIN"], fg=c["FG_TEXT"])
+            self.chat_box.tag_config("content", foreground=c["FG_TEXT"])
+        if hasattr(self, 'txt_input'):
+            self.txt_input.config(bg=c["BG_CARD"], fg=c["FG_TEXT"], insertbackground=c["ACCENT"])

@@ -14,45 +14,16 @@ persistent memory graphs, and local multimodal training.
 """
 
 # FILE: Plugins/tab_video_factory.py
-
-
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
-import threading
 import os
-from datetime import datetime
 import cv2
-import numpy as np
-import torch
-import torchaudio
-from PIL import Image
+import threading
 import subprocess
-import json
-import traceback
-
-# --- DEPENDENCY CHECK ---
-try:
-    from moviepy.editor import AudioFileClip
-
-    HAS_MOVIEPY = True
-except ImportError:
-    HAS_MOVIEPY = False
-    print(" ! VideoFactory: Install 'moviepy' for audio extraction.")
-
-try:
-    import imageio_ffmpeg
-
-    FFMPEG_EXE = imageio_ffmpeg.get_ffmpeg_exe()
-except ImportError:
-    FFMPEG_EXE = "ffmpeg"
-
-try:
-    from pysrt import SubRipFile
-
-    HAS_PYSRT = True
-except ImportError:
-    HAS_PYSRT = False
-    print(" ! VideoFactory: Install 'pysrt' for subtitle syncing.")
+import uuid
+import queue
+import time
+from datetime import datetime
 
 
 class Plugin:
@@ -62,275 +33,257 @@ class Plugin:
         self.name = "Video Factory"
 
         # State
-        self.is_running = False
+        self.is_processing = False
         self.stop_requested = False
-        self.queue = []
+        self.video_queue = []
+        self.update_queue = queue.Queue()
 
-        # Paths
-        default_data = self.app.paths.get("data", "D:/Training_Data")
-        self.source_path = tk.StringVar(value=default_data)
+        # Config Defaults
+        default_in = self.app.paths.get("data", "")
+        default_out = os.path.join(default_in, "Processed_Video")
 
-        # Settings
-        self.fps_var = tk.DoubleVar(value=2.0)  # Extract 2 frames per second
-        self.audio_len_var = tk.DoubleVar(value=2.0)  # 2 seconds of audio per frame
+        self.input_dir = tk.StringVar(value=default_in)
+        self.output_dir = tk.StringVar(value=default_out)
+        self.chunk_len = tk.IntVar(value=10)  # Seconds
+        self.resize_dim = tk.IntVar(value=512)  # px
         self.skip_existing = tk.BooleanVar(value=True)
-        self.auto_scroll = tk.BooleanVar(value=True)
-        self.gen_physics = tk.BooleanVar(value=True)  # Generate Optical Flow (Control)
 
         self._setup_ui()
+        if self.parent:
+            self.parent.after(100, self._process_gui_queue)
 
     def _setup_ui(self):
-        # 1. HEADER & CONTROLS
-        top = ttk.LabelFrame(self.parent, text="Timeline Slicer Configuration", padding=15)
-        top.pack(fill="x", padx=10, pady=10)
+        if self.parent is None: return
 
-        # Path Row
-        r1 = ttk.Frame(top)
-        r1.pack(fill="x", pady=5)
-        ttk.Label(r1, text="Source Folder:", width=12).pack(side="left")
-        ttk.Entry(r1, textvariable=self.source_path).pack(side="left", fill="x", expand=True, padx=5)
-        ttk.Button(r1, text="📂", width=4, command=self._browse).pack(side="left")
-        ttk.Button(r1, text="SCAN", command=self._scan).pack(side="left", padx=(5, 0))
+        # 1. IO CONFIG
+        fr_io = ttk.LabelFrame(self.parent, text="Pipeline Configuration", padding=10)
+        fr_io.pack(fill="x", padx=10, pady=5)
 
-        # Config Row
-        r2 = ttk.Frame(top)
-        r2.pack(fill="x", pady=10)
+        # Input
+        r1 = ttk.Frame(fr_io)
+        r1.pack(fill="x", pady=2)
+        ttk.Label(r1, text="Video Source:", width=12).pack(side="left")
+        ttk.Entry(r1, textvariable=self.input_dir).pack(side="left", fill="x", expand=True, padx=5)
+        ttk.Button(r1, text="📂", width=4, command=lambda: self._browse(self.input_dir)).pack(side="left")
 
-        ttk.Label(r2, text="Extraction FPS:").pack(side="left")
-        ttk.Spinbox(r2, from_=0.1, to=30.0, increment=0.5, textvariable=self.fps_var, width=5).pack(side="left", padx=5)
+        # Output
+        r2 = ttk.Frame(fr_io)
+        r2.pack(fill="x", pady=2)
+        ttk.Label(r2, text="Output Root:", width=12).pack(side="left")
+        ttk.Entry(r2, textvariable=self.output_dir).pack(side="left", fill="x", expand=True, padx=5)
+        ttk.Button(r2, text="📂", width=4, command=lambda: self._browse(self.output_dir)).pack(side="left")
 
-        ttk.Label(r2, text="Audio Window (s):").pack(side="left", padx=(15, 0))
-        ttk.Spinbox(r2, from_=0.1, to=10.0, increment=0.5, textvariable=self.audio_len_var, width=5).pack(side="left",
-                                                                                                          padx=5)
+        # Settings
+        r3 = ttk.Frame(fr_io)
+        r3.pack(fill="x", pady=5)
+        ttk.Label(r3, text="Chunk Size (s):").pack(side="left")
+        ttk.Spinbox(r3, from_=1, to=60, textvariable=self.chunk_len, width=5).pack(side="left", padx=5)
 
-        ttk.Checkbutton(r2, text="Calc Optical Flow (Physics)", variable=self.gen_physics).pack(side="left", padx=20)
-        ttk.Checkbutton(r2, text="Skip Existing", variable=self.skip_existing).pack(side="left", padx=5)
+        ttk.Label(r3, text="Resize (px):").pack(side="left", padx=(10, 0))
+        ttk.Spinbox(r3, from_=128, to=1024, increment=64, textvariable=self.resize_dim, width=5).pack(side="left",
+                                                                                                      padx=5)
 
-        # 2. ACTION BUTTON
-        self.btn_run = ttk.Button(top, text="START PRODUCTION LINE", command=self._toggle_run, state="disabled")
-        self.btn_run.pack(fill="x", pady=(10, 0))
+        ttk.Checkbutton(r3, text="Skip Existing", variable=self.skip_existing).pack(side="left", padx=15)
 
-        # 3. LOG OUTPUT
-        log_fr = ttk.LabelFrame(self.parent, text="Factory Telemetry", padding=10)
-        log_fr.pack(fill="both", expand=True, padx=10, pady=5)
+        # 2. QUEUE VIEW
+        fr_list = ttk.Frame(self.parent)
+        fr_list.pack(fill="both", expand=True, padx=10, pady=5)
 
-        self.log_box = tk.Text(log_fr, font=("Consolas", int(9 * getattr(self.app, 'ui_scale', 1.0))),
-                               bg=self.app.colors["BG_MAIN"], fg=self.app.colors["FG_TEXT"], borderwidth=0)
-        self.log_box.pack(side="left", fill="both", expand=True)
+        # Tools
+        tb = ttk.Frame(fr_list)
+        tb.pack(fill="x", pady=2)
+        ttk.Button(tb, text="SCAN FOR VIDEOS", command=self._scan).pack(side="left", fill="x", expand=True)
+        ttk.Label(tb, text=" | ", foreground=self.app.colors["FG_DIM"]).pack(side="left")
+        self.lbl_count = ttk.Label(tb, text="0 files found", foreground=self.app.colors["ACCENT"])
+        self.lbl_count.pack(side="left")
 
-        sb = ttk.Scrollbar(log_fr, command=self.log_box.yview)
+        # Tree
+        cols = ("File", "Size", "Status")
+        self.tree = ttk.Treeview(fr_list, columns=cols, show="headings", height=8)
+        self.tree.heading("File", text="Filename")
+        self.tree.heading("Size", text="Size")
+        self.tree.heading("Status", text="Status")
+
+        self.tree.column("File", width=400)
+        self.tree.column("Size", width=80, anchor="center")
+        self.tree.column("Status", width=150, anchor="center")
+
+        sb = ttk.Scrollbar(fr_list, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+
+        self.tree.pack(side="left", fill="both", expand=True)
         sb.pack(side="right", fill="y")
-        self.log_box.config(yscrollcommand=sb.set)
 
-        # Tags
-        self.log_box.tag_config("info", foreground=self.app.colors["FG_DIM"])
-        self.log_box.tag_config("proc", foreground=self.app.colors["ACCENT"])
-        self.log_box.tag_config("success", foreground=self.app.colors["SUCCESS"])
-        self.log_box.tag_config("warn", foreground=self.app.colors["WARN"])
-        self.log_box.tag_config("err", foreground=self.app.colors["ERROR"])
+        # 3. ACTIONS
+        fr_run = ttk.Frame(self.parent, padding=10)
+        fr_run.pack(fill="x", pady=5)
 
-    def _browse(self):
-        d = filedialog.askdirectory()
-        if d: self.source_path.set(d)
+        self.btn_run = ttk.Button(fr_run, text="START PROCESSING", command=self._toggle_run, state="disabled")
+        self.btn_run.pack(side="left", fill="x", expand=True, padx=5)
 
-    def _log(self, msg, tag="info"):
-        ts = datetime.now().strftime('%H:%M:%S')
-        self.log_box.insert(tk.END, f"[{ts}] {msg}\n", tag)
-        if self.auto_scroll.get(): self.log_box.see(tk.END)
+        self.progress = ttk.Progressbar(fr_run, orient="horizontal", mode="determinate")
+        self.progress.pack(side="left", fill="x", expand=True, padx=5)
 
+        # Status Bar
+        self.lbl_status = ttk.Label(self.parent, text="Ready.", foreground=self.app.colors["FG_DIM"], anchor="w")
+        self.lbl_status.pack(fill="x", padx=15, pady=(0, 10))
+
+    # --- HELPERS ---
+    def _browse(self, var):
+        d = filedialog.askdirectory(initialdir=var.get())
+        if d: var.set(d)
+
+    def _log(self, msg, tag="INFO"):
+        self.update_queue.put(lambda: self.lbl_status.config(text=msg))
+        if self.app.golgi:
+            # Route to Golgi
+            level = "INFO"
+            if tag == "ERROR":
+                level = "ERROR"
+            elif tag == "SUCCESS":
+                level = "SUCCESS"
+            self.app.golgi._dispatch(level, msg, source="VideoFactory")
+
+    def _process_gui_queue(self):
+        while not self.update_queue.empty():
+            try:
+                fn = self.update_queue.get_nowait()
+                fn()
+            except:
+                break
+        if self.parent:
+            self.parent.after(100, self._process_gui_queue)
+
+    def _update_tree(self, iid, col, val):
+        self.update_queue.put(lambda: self.tree.set(iid, col, val))
+
+    # --- SCANNING ---
     def _scan(self):
-        folder = self.source_path.get()
-        if not os.path.exists(folder): return
+        folder = self.input_dir.get()
+        if not os.path.exists(folder):
+            messagebox.showerror("Error", "Input folder does not exist.")
+            return
 
-        self.queue = []
-        valid_exts = {'.mp4', '.mkv', '.avi', '.mov', '.webm'}
+        for i in self.tree.get_children(): self.tree.delete(i)
+        self.video_queue = []
+
+        valid_exts = {".mp4", ".mkv", ".mov", ".avi", ".webm"}
 
         for root, _, files in os.walk(folder):
             for f in files:
-                if os.path.splitext(f)[1].lower() in valid_exts:
-                    self.queue.append(os.path.join(root, f))
+                _, ext = os.path.splitext(f)
+                if ext.lower() in valid_exts:
+                    full = os.path.join(root, f)
+                    sz = f"{os.path.getsize(full) / (1024 * 1024):.1f} MB"
 
-        self._log(f"Scanner found {len(self.queue)} video files.", "success")
-        if self.queue:
+                    self.tree.insert("", "end", iid=full, values=(f, sz, "Queued"))
+                    self.video_queue.append(full)
+
+        self.lbl_count.config(text=f"{len(self.video_queue)} files found")
+        if self.video_queue:
             self.btn_run.config(state="normal")
+        self._log(f"Scan complete. Found {len(self.video_queue)} videos.")
 
+    # --- PROCESSING ---
     def _toggle_run(self):
-        if self.is_running:
+        if self.is_processing:
             self.stop_requested = True
             self.btn_run.config(text="STOPPING...")
         else:
-            if not self.queue: self._scan()
-            if not self.queue: return
-
-            if not HAS_MOVIEPY:
-                messagebox.showerror("Dependency Error", "Please install 'moviepy' to slice audio.")
-                return
-
-            self.is_running = True
             self.stop_requested = False
-            self.btn_run.config(text="HALT FACTORY")
+            self.is_processing = True
+            self.btn_run.config(text="STOP PROCESSING")
             threading.Thread(target=self._worker, daemon=True).start()
 
     def _worker(self):
-        try:
-            total_vids = len(self.queue)
+        out_root = self.output_dir.get()
+        if not os.path.exists(out_root):
+            try:
+                os.makedirs(out_root)
+            except:
+                pass
 
-            for i, vid_path in enumerate(self.queue):
-                if self.stop_requested: break
+        chunk_s = self.chunk_len.get()
+        dim = self.resize_dim.get()
 
-                vid_name = os.path.basename(vid_path)
-                base_name = os.path.splitext(vid_name)[0]
-                parent_dir = os.path.dirname(vid_path)
+        total = len(self.video_queue)
 
-                # Output folder: adjacent to video, named "VideoName_timeline"
-                out_dir = os.path.join(parent_dir, f"{base_name}_timeline")
-                if not os.path.exists(out_dir): os.makedirs(out_dir)
+        for idx, vid_path in enumerate(self.video_queue):
+            if self.stop_requested: break
 
-                self.parent.after(0, lambda m=f"Processing {i + 1}/{total_vids}: {vid_name}": self._log(m, "proc"))
+            fname = os.path.basename(vid_path)
+            self._update_tree(vid_path, "Status", "Processing...")
+            self._log(f"Processing {fname} ({idx + 1}/{total})...")
 
-                # --- PRE-PROCESSING ---
+            # Create subfolder for this video? Or flat?
+            # Let's do flat but prefixed
+            base_name = os.path.splitext(fname)[0].replace(" ", "_")
 
-                # 1. Audio Extraction (Full track to RAM/Temp)
-                temp_wav = os.path.join(parent_dir, "_temp_audio.wav")
-                has_audio = False
-                try:
-                    clip = AudioFileClip(vid_path)
-                    clip.write_audiofile(temp_wav, fps=24000, nbytes=2, verbose=False, logger=None)
-                    clip.close()
-                    waveform, sr = torchaudio.load(temp_wav)
-                    has_audio = True
-                except Exception as e:
-                    self.parent.after(0, lambda: self._log(f"Audio extraction failed (silent mode): {e}", "warn"))
-                    waveform = None
-                    sr = 24000
-
-                # 2. Subtitle Extraction
-                subs = None
-                sidecar = os.path.splitext(vid_path)[0] + ".srt"
-                if os.path.exists(sidecar) and HAS_PYSRT:
-                    try:
-                        subs = SubRipFile.open(sidecar, encoding='utf-8')
-                        self.parent.after(0, lambda: self._log("Loaded sidecar subtitles.", "info"))
-                    except:
-                        pass
-
-                # --- SLICING LOOP ---
+            try:
                 cap = cv2.VideoCapture(vid_path)
                 fps = cap.get(cv2.CAP_PROP_FPS)
-                if fps <= 0: fps = 24.0
+                frame_count = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
+                duration = frame_count / fps
 
-                target_interval = int(fps / self.fps_var.get())
-                if target_interval < 1: target_interval = 1
+                # Iterate chunks
+                num_chunks = int(duration // chunk_s)
 
-                frame_idx = 0
-                slice_idx = 0
-                prev_gray = None  # For Optical Flow
-
-                while cap.isOpened():
+                for i in range(num_chunks):
                     if self.stop_requested: break
 
+                    start_t = i * chunk_s
+                    # Naming scheme: video_T0000.jpg
+                    chunk_id = f"{base_name}_T{int(start_t):04d}"
+                    out_img = os.path.join(out_root, f"{chunk_id}.jpg")
+                    out_aud = os.path.join(out_root, f"{chunk_id}.wav")
+
+                    if self.skip_existing.get() and os.path.exists(out_img) and os.path.exists(out_aud):
+                        continue
+
+                    # 1. VISUAL: Grab frame at start_t
+                    frame_id = int(start_t * fps)
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_id)
                     ret, frame = cap.read()
-                    if not ret: break
 
-                    # Optical Flow Calculation (Physics/Context Channel)
-                    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    control_vec = [0.0, 0.0]
+                    if ret:
+                        # Resize
+                        h, w = frame.shape[:2]
+                        scale = dim / min(h, w)
+                        nh, nw = int(h * scale), int(w * scale)
+                        frame = cv2.resize(frame, (nw, nh))
 
-                    if self.gen_physics.get() and prev_gray is not None:
-                        # Farneback Dense Flow
-                        flow = cv2.calcOpticalFlowFarneback(prev_gray, gray, None, 0.5, 3, 15, 3, 5, 1.2, 0)
-                        # Average motion vector for the whole frame (Simplified Physics)
-                        avg_flow = np.mean(flow, axis=(0, 1))
-                        # Normalize/Scale for embedding
-                        control_vec = [float(avg_flow[0]) / 5.0, float(avg_flow[1]) / 5.0]
+                        # Center crop to square (optional, but good for training)
+                        # For now, just save resized
+                        cv2.imwrite(out_img, frame)
 
-                    # Capture Slice
-                    if frame_idx % target_interval == 0:
-                        timestamp = frame_idx / fps
+                    # 2. AUDIO: Extract segment using ffmpeg
+                    # ffmpeg -ss {start} -t {dur} -i {in} -ac 1 -ar 24000 {out}
+                    cmd = [
+                        "ffmpeg", "-y", "-v", "error",
+                        "-ss", str(start_t),
+                        "-t", str(chunk_s),
+                        "-i", vid_path,
+                        "-ac", "1",  # Mono
+                        "-ar", "24000",  # Ribosome standard
+                        out_aud
+                    ]
+                    subprocess.run(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-                        # File Naming (Narrative Order)
-                        # e.g., vid_name_p0001.png
-                        fname_base = f"{base_name}_p{slice_idx:05d}"
-                        out_path_base = os.path.join(out_dir, fname_base)
-
-                        if self.skip_existing.get() and os.path.exists(f"{out_path_base}.png"):
-                            pass  # Skip saving, but update state
-                        else:
-                            # A. SAVE VISUAL (V)
-                            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-                            img = Image.fromarray(rgb).resize((256, 256))
-                            img.save(f"{out_path_base}.png")
-
-                            # B. SAVE AUDIO (A)
-                            if has_audio:
-                                center_sample = int(timestamp * sr)
-                                half_win = int((self.audio_len_var.get() / 2) * sr)
-                                start = max(0, center_sample - half_win)
-                                end = min(waveform.shape[1], center_sample + half_win)
-
-                                audio_slice = waveform[:, start:end]
-                                # Pad if too short (at edges)
-                                target_len = int(self.audio_len_var.get() * sr)
-                                if audio_slice.shape[1] < target_len:
-                                    pad = target_len - audio_slice.shape[1]
-                                    audio_slice = torch.cat([audio_slice, torch.zeros(audio_slice.shape[0], pad)],
-                                                            dim=1)
-
-                                torchaudio.save(f"{out_path_base}.wav", audio_slice, sr)
-
-                            # C. SAVE TEXT (T)
-                            txt_content = ""
-                            if subs:
-                                cur_ms = timestamp * 1000
-                                # Find active sub
-                                # Simple linear search (can be optimized, but fine for factory speed)
-                                for sub in subs:
-                                    if sub.start.ordinal <= cur_ms <= sub.end.ordinal:
-                                        txt_content = sub.text.replace('\n', ' ')
-                                        break
-
-                            with open(f"{out_path_base}.txt", "w", encoding='utf-8') as f:
-                                f.write(txt_content)
-
-                            # D. SAVE CONTROL/PHYSICS (C)
-                            # Future-proofing: Saving as JSON for flexible metadata loading
-                            c_data = {
-                                "control_vec": control_vec,
-                                "timestamp": timestamp,
-                                "source": vid_name
-                            }
-                            with open(f"{out_path_base}.json", "w", encoding='utf-8') as f:
-                                json.dump(c_data, f)
-
-                        slice_idx += 1
-                        if slice_idx % 50 == 0:
-                            self.parent.after(0, lambda c=slice_idx: self._log(f" -> Generated {c} engrams...", "info"))
-
-                    # Update state
-                    prev_gray = gray
-                    frame_idx += 1
+                    # Update Progress
+                    pct = ((idx + (i / num_chunks)) / total) * 100
+                    self.update_queue.put(lambda v=pct: self.progress.configure(value=v))
 
                 cap.release()
+                self._update_tree(vid_path, "Status", "Done")
 
-                # Cleanup temp audio
-                if os.path.exists(temp_wav):
-                    try:
-                        os.remove(temp_wav)
-                    except:
-                        pass
+            except Exception as e:
+                self._update_tree(vid_path, "Status", "Failed")
+                self._log(f"Error on {fname}: {e}", "ERROR")
 
-                self.parent.after(0, lambda n=vid_name, c=slice_idx: self._log(f"Completed {n}: {c} Quadruplets.",
-                                                                               "success"))
-
-        except Exception as e:
-            traceback.print_exc()
-            self.parent.after(0, lambda err=str(e): self._log(f"CRITICAL ERROR: {err}", "err"))
-
-        finally:
-            self.is_running = False
-            self.parent.after(0, lambda: self.btn_run.config(text="START PRODUCTION LINE"))
+        self.is_processing = False
+        self.update_queue.put(lambda: self.btn_run.config(text="START PROCESSING"))
+        self._log("Batch Processing Complete.", "SUCCESS")
+        self.update_queue.put(lambda: self.progress.configure(value=0))
 
     def on_theme_change(self):
-        c = self.app.colors
-        if hasattr(self, 'log_box'):
-            self.log_box.config(bg=c["BG_MAIN"], fg=c["FG_TEXT"])
+        pass

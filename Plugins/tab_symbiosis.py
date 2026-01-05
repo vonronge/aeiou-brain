@@ -14,13 +14,10 @@ persistent memory graphs, and local multimodal training.
 """
 
 import tkinter as tk
-from tkinter import ttk
+from tkinter import ttk, messagebox
 import threading
-import torch
-import torch.nn.functional as F
-from torch.cuda.amp import autocast, GradScaler
+import queue
 import time
-import os
 from datetime import datetime
 
 
@@ -28,273 +25,200 @@ class Plugin:
     def __init__(self, parent, app):
         self.parent = parent
         self.app = app
-        self.name = "Symbiosis"
+        self.name = "Neural Symbiosis"
 
+        # --- STATE ---
         self.is_running = False
         self.stop_requested = False
+        self.update_queue = queue.Queue()
 
-        # UI vars
-        self.teacher_id = tk.IntVar(value=2)
-        self.student_id = tk.IntVar(value=1)
+        # Config Vars
+        self.teacher_id = tk.IntVar(value=1)
+        self.student_id = tk.IntVar(value=2)
 
-        # Storage settings
-        self.autosave_enabled = tk.BooleanVar(value=True)
-        self.save_interval = tk.IntVar(value=50)
-        self.harvest_enabled = tk.BooleanVar(value=True)
-        self.auto_scroll = tk.BooleanVar(value=True)
+        # Distillation Params
+        self.temperature = tk.DoubleVar(value=2.0)
+        self.alpha = tk.DoubleVar(value=0.5)  # 0.5 = Equal mix of Hard/Soft loss
+        self.harvest_memories = tk.BooleanVar(value=True)  # Use Hippocampus replay?
+        self.auto_save = tk.BooleanVar(value=True)
 
-        # Harvest Config
-        self.harvest_dir = os.path.join(self.app.paths['memories'], "harvested")
-        if not os.path.exists(self.harvest_dir): os.makedirs(self.harvest_dir)
-        self.max_file_size = 10 * 1024 * 1024  # 10 MB limit
+        self.status_msg = tk.StringVar(value="Ready to Link.")
 
         self._setup_ui()
+        if self.parent:
+            self.parent.after(100, self._process_gui_queue)
 
     def _setup_ui(self):
-        split = ttk.PanedWindow(self.parent, orient="vertical")
-        split.pack(fill="both", expand=True, padx=10, pady=10)
+        if self.parent is None: return
 
-        # --- TOP PANEL: CONTROLS ---
-        top_frame = ttk.Frame(split)
-        split.add(top_frame, weight=0)
+        scale = getattr(self.app, 'ui_scale', 1.0)
 
-        # 1. Connection Panel
-        panel = ttk.LabelFrame(top_frame, text="Neural Link", padding=15)
-        panel.pack(fill="x", pady=(0, 10))
+        # 1. LINK CONFIGURATION
+        fr_link = ttk.LabelFrame(self.parent, text="Neural Link Configuration", padding=15)
+        fr_link.pack(fill="x", padx=10, pady=10)
 
-        f_link = ttk.Frame(panel)
-        f_link.pack(fill="x", pady=5)
+        # Teacher Selection
+        f_teach = ttk.Frame(fr_link)
+        f_teach.pack(side="left", fill="x", expand=True, padx=5)
+        ttk.Label(f_teach, text="Teacher Lobe (Source):", font=("Segoe UI", int(10 * scale), "bold")).pack(anchor="w")
 
-        # Selectors
-        ttk.Label(f_link, text="TEACHER:", font=("Segoe UI", 9, "bold")).pack(side="left")
-        ttk.Spinbox(f_link, from_=1, to=4, textvariable=self.teacher_id, width=3).pack(side="left", padx=5)
-        ttk.Label(f_link, text=" >>> STREAMS TO >>> ", foreground=self.app.colors["ACCENT"]).pack(side="left", padx=5)
-        ttk.Label(f_link, text="STUDENT:", font=("Segoe UI", 9, "bold")).pack(side="left")
-        ttk.Spinbox(f_link, from_=1, to=4, textvariable=self.student_id, width=3).pack(side="left", padx=5)
+        for i in range(1, 5):
+            r = ttk.Radiobutton(f_teach, text=f"Lobe {i}", variable=self.teacher_id, value=i,
+                                command=self._validate_selection)
+            r.pack(anchor="w", pady=2)
 
-        # Storage Row
-        f_store = ttk.Frame(panel)
-        f_store.pack(fill="x", pady=(10, 0))
+        # Separator (Arrow)
+        ttk.Label(fr_link, text="➔", font=("Segoe UI", int(20 * scale))).pack(side="left", padx=10)
 
-        # Auto-Save Brain
-        ttk.Checkbutton(f_store, text="Auto-Save Brain", variable=self.autosave_enabled).pack(side="left")
-        ttk.Label(f_store, text="Every").pack(side="left", padx=2)
-        ttk.Entry(f_store, textvariable=self.save_interval, width=4).pack(side="left")
-        ttk.Label(f_store, text="Cycles").pack(side="left", padx=(2, 15))
+        # Student Selection
+        f_stud = ttk.Frame(fr_link)
+        f_stud.pack(side="left", fill="x", expand=True, padx=5)
+        ttk.Label(f_stud, text="Student Lobe (Target):", font=("Segoe UI", int(10 * scale), "bold")).pack(anchor="w")
 
-        # Harvest Data
-        ttk.Separator(f_store, orient="vertical").pack(side="left", fill="y", padx=5)
-        ttk.Checkbutton(f_store, text="Harvest Output (Max 10MB/file)", variable=self.harvest_enabled).pack(side="left",
-                                                                                                            padx=5)
+        for i in range(1, 5):
+            r = ttk.Radiobutton(f_stud, text=f"Lobe {i}", variable=self.student_id, value=i,
+                                command=self._validate_selection)
+            r.pack(anchor="w", pady=2)
 
-        # 2. Action Button
-        self.btn_start = ttk.Button(panel, text="INITIATE SYMBIOSIS", command=self._toggle_symbiosis)
-        self.btn_start.pack(fill="x", pady=(10, 0))
+        # 2. HYPERPARAMETERS
+        fr_param = ttk.LabelFrame(self.parent, text="Distillation Parameters", padding=15)
+        fr_param.pack(fill="x", padx=10, pady=5)
 
-        # --- BOTTOM PANEL: LOGS ---
-        bot_frame = ttk.LabelFrame(split, text="Symbiosis Telemetry", padding=10)
-        split.add(bot_frame, weight=1)
+        # Temperature
+        r1 = ttk.Frame(fr_param)
+        r1.pack(fill="x", pady=5)
+        ttk.Label(r1, text="Temperature (Softness):").pack(side="left", width=20)
+        s_temp = ttk.Scale(r1, from_=1.0, to=10.0, variable=self.temperature, orient="horizontal")
+        s_temp.pack(side="left", fill="x", expand=True)
+        l_temp = ttk.Label(r1, text=f"{self.temperature.get():.1f}")
+        l_temp.pack(side="left", padx=5)
+        s_temp.configure(command=lambda v: l_temp.configure(text=f"{float(v):.1f}"))
 
-        tool_fr = ttk.Frame(bot_frame)
-        tool_fr.pack(fill="x")
-        ttk.Checkbutton(tool_fr, text="Autoscroll", variable=self.auto_scroll).pack(side="right")
+        # Alpha (Balance)
+        r2 = ttk.Frame(fr_param)
+        r2.pack(fill="x", pady=5)
+        ttk.Label(r2, text="Alpha (Teacher Weight):").pack(side="left", width=20)
+        s_alp = ttk.Scale(r2, from_=0.0, to=1.0, variable=self.alpha, orient="horizontal")
+        s_alp.pack(side="left", fill="x", expand=True)
+        l_alp = ttk.Label(r2, text=f"{self.alpha.get():.2f}")
+        l_alp.pack(side="left", padx=5)
+        s_alp.configure(command=lambda v: l_alp.configure(text=f"{float(v):.2f}"))
 
-        self.log_box = tk.Text(bot_frame, font=("Consolas", int(9 * getattr(self.app, 'ui_scale', 1.0))), height=15,
-                               bg=self.app.colors["BG_MAIN"], fg=self.app.colors["FG_TEXT"], borderwidth=0)
-        self.log_box.pack(side="left", fill="both", expand=True)
-        sb = ttk.Scrollbar(bot_frame, orient="vertical", command=self.log_box.yview)
-        self.log_box.configure(yscrollcommand=sb.set)
-        sb.pack(side="right", fill="y")
+        # Toggles
+        r3 = ttk.Frame(fr_param)
+        r3.pack(fill="x", pady=10)
+        ttk.Checkbutton(r3, text="Harvest Hippocampus (Replay Memories)", variable=self.harvest_memories).pack(
+            side="left", padx=5)
+        ttk.Checkbutton(r3, text="Auto-Save Student", variable=self.auto_save).pack(side="left", padx=20)
 
-        self.log_box.tag_config("info", foreground=self.app.colors["FG_TEXT"])
-        self.log_box.tag_config("gen", foreground=self.app.colors["ACCENT"])
-        self.log_box.tag_config("save", foreground=self.app.colors["SUCCESS"], font=("Consolas", 9, "bold"))
-        self.log_box.tag_config("harvest", foreground="#FDD663", font=("Consolas", 9, "italic"))
-        self.log_box.tag_config("warn", foreground=self.app.colors["WARN"])
-        self.log_box.tag_config("err", foreground=self.app.colors["ERROR"])
+        # 3. CONTROLS & LOGS
+        fr_ctrl = ttk.Frame(self.parent, padding=10)
+        fr_ctrl.pack(fill="both", expand=True)
 
-    def _log(self, msg, tag="info"):
-        ts = datetime.now().strftime('%H:%M:%S')
-        full_msg = f"[{ts}] {msg}\n"
-        self.log_box.insert(tk.END, full_msg, tag)
-        if self.auto_scroll.get(): self.log_box.see(tk.END)
+        self.btn_start = ttk.Button(fr_ctrl, text="INITIATE SYMBIOSIS", command=self._toggle_run)
+        self.btn_start.pack(fill="x", pady=5)
+
+        # Status Bar
+        self.lbl_status = ttk.Label(fr_ctrl, textvariable=self.status_msg, foreground=self.app.colors["ACCENT"],
+                                    anchor="center")
+        self.lbl_status.pack(fill="x", pady=5)
+
+        # Log Box
+        log_font = ("Consolas", int(10 * scale))
+        self.log_box = tk.Text(fr_ctrl, font=log_font, height=8, bg=self.app.colors["BG_MAIN"],
+                               fg=self.app.colors["FG_TEXT"])
+        self.log_box.pack(fill="both", expand=True)
+
+        # Attach Golgi Sink for this tab
+        self.app.golgi.attach_sink("symbiosis_tab", self._on_golgi_message)
+
+    def _validate_selection(self):
+        t = self.teacher_id.get()
+        s = self.student_id.get()
+
+        if t == s:
+            self.status_msg.set("⚠️ Error: Teacher and Student cannot be the same Lobe.")
+            self.btn_start.config(state="disabled")
+        else:
+            self.status_msg.set(f"Ready: Lobe {t} ➔ Lobe {s}")
+            self.btn_start.config(state="normal")
+
+    def _toggle_run(self):
+        if self.is_running:
+            self.app.symbiont.stop()
+            self.btn_start.config(text="STOPPING...")
+            self.status_msg.set("Severing link...")
+        else:
+            self._start_symbiosis()
+
+    def _start_symbiosis(self):
+        t_id = self.teacher_id.get()
+        s_id = self.student_id.get()
+
+        # 1. Get Handles
+        teacher = self.app.lobe_manager.get_lobe(t_id)
+        student = self.app.lobe_manager.get_lobe(s_id)
+
+        if not teacher:
+            messagebox.showerror("Error", f"Teacher Lobe {t_id} is not loaded.")
+            return
+        if not student:
+            messagebox.showerror("Error", f"Student Lobe {s_id} is not loaded.")
+            return
+
+        # 2. Configure Symbiont
+        from Organelles.symbiont import SymbiosisConfig
+
+        config = SymbiosisConfig(
+            temperature=self.temperature.get(),
+            alpha=self.alpha.get(),
+            harvest_enabled=self.harvest_memories.get(),
+            save_interval=50 if self.auto_save.get() else 0
+        )
+
+        # 3. Link & Launch
+        try:
+            self.app.symbiont.link(teacher, student, config)
+            self.app.symbiont.start()
+
+            self.is_running = True
+            self.btn_start.config(text="SEVER CONNECTION")
+            self.status_msg.set("Symbiosis Active: Knowledge Transfer in Progress...")
+
+            # Start monitoring thread
+            threading.Thread(target=self._monitor_loop, daemon=True).start()
+
+        except Exception as e:
+            self.app.golgi.error(f"Symbiosis Failed: {e}", source="Symbiosis")
+
+    def _monitor_loop(self):
+        while self.app.symbiont.is_active:
+            time.sleep(0.5)
+            # You could pull stats from symbiont here if exposed
+
+        self.is_running = False
+        self.update_queue.put(lambda: self.btn_start.config(text="INITIATE SYMBIOSIS"))
+        self.update_queue.put(lambda: self.status_msg.set("Link Severed."))
+
+    def _on_golgi_message(self, record):
+        """Receives log messages from the Golgi apparatus."""
+        if record.source == "Symbiont":
+            self.update_queue.put(lambda: self._log(f"[{record.timestamp}] {record.message}"))
+
+    def _log(self, msg):
+        self.log_box.insert(tk.END, msg + "\n")
+        self.log_box.see(tk.END)
+
+    def _process_gui_queue(self):
+        while not self.update_queue.empty():
+            try:
+                fn = self.update_queue.get_nowait()
+                fn()
+            except:
+                break
+        if self.parent:
+            self.parent.after(100, self._process_gui_queue)
 
     def on_theme_change(self):
         c = self.app.colors
         if hasattr(self, 'log_box'): self.log_box.config(bg=c["BG_MAIN"], fg=c["FG_TEXT"])
-
-    def _toggle_symbiosis(self):
-        if self.is_running:
-            self.stop_requested = True
-            self.btn_start.config(text="STOPPING...", state="disabled")
-        else:
-            t_id = self.teacher_id.get()
-            s_id = self.student_id.get()
-
-            if not self.app.lobes[t_id] or not self.app.lobes[s_id]:
-                self._log("Error: Both Lobes must be loaded.", "err")
-                return
-
-            self.is_running = True
-            self.stop_requested = False
-            self.btn_start.config(text="SEVER LINK")
-            self._log(f"Link Established: Teacher Lobe {t_id} -> Student Lobe {s_id}", "info")
-
-            threading.Thread(target=self._worker, daemon=True).start()
-
-    def _worker(self):
-        t_id = self.teacher_id.get()
-        s_id = self.student_id.get()
-
-        teacher = self.app.lobes[t_id]
-        student = self.app.lobes[s_id]
-        opt = self.app.optimizers[s_id]
-        scaler = self.app.scalers[s_id]
-
-        # --- SAFETY: FREEZE SENSES ---
-        frozen_layers = []
-        try:
-            if hasattr(student, 'vis_emb'):
-                for p in student.vis_emb.parameters(): p.requires_grad = False
-                frozen_layers.append("Vision")
-            if hasattr(student, 'aud_emb'):
-                for p in student.aud_emb.parameters(): p.requires_grad = False
-                frozen_layers.append("Audio")
-        except:
-            pass
-
-        msg_freeze = f"Sensors Locked: {', '.join(frozen_layers)}" if frozen_layers else "No Sensors Found"
-        self.parent.after(0, lambda: self._log(f"Safety Protocol: {msg_freeze}", "warn"))
-
-        student.train()
-        teacher.eval()
-
-        try:
-            student_vocab_limit = student.tok_emb.weight.shape[0]
-        except:
-            student_vocab_limit = 50257
-
-        prompts = [
-            "Explain the concept of", "The history of", "Why is", "How does",
-            "Describe the function of", "A summary of", "Write a story about",
-            "Define the term", "Compare and contrast", "What happens if"
-        ]
-
-        try:
-            t_tok = getattr(teacher, 'tokenizer', self.app.ribosome.tokenizer)
-            s_tok = self.app.ribosome.tokenizer
-        except:
-            self.parent.after(0, lambda: self._log("Error: Could not locate tokenizers.", "err"))
-            self.is_running = False
-            return
-
-        cycles = 0
-
-        # Init Harvest File
-        timestamp = datetime.now().strftime('%Y%m%d_%H%M%S')
-        harvest_base = f"symbiosis_session_{timestamp}"
-        harvest_part = 1
-        harvest_path = os.path.join(self.harvest_dir, f"{harvest_base}_p{harvest_part}.txt")
-
-        while not self.stop_requested:
-            try:
-                # 1. Generate
-                import random
-                prompt = random.choice(prompts)
-
-                generated_text = ""
-                if hasattr(teacher, "generate"):
-                    generated_text = teacher.generate(prompt, max_new_tokens=64)
-                else:
-                    generated_text = "The neural network is learning to dream."
-
-                if not generated_text: generated_text = "Empty response."
-
-                # 2. Translate
-                try:
-                    s_tokens = s_tok.encode(generated_text)
-                except:
-                    if hasattr(s_tok, '__call__'):
-                        s_tokens = s_tok(generated_text)['input_ids']
-                    else:
-                        continue
-
-                # 3. Clamp
-                safe_tokens = [t % student_vocab_limit for t in s_tokens]
-                t_input = torch.tensor([safe_tokens]).to(self.app.device)
-
-                if t_input.shape[1] < 2: continue
-
-                # 4. Student Learns
-                inp = t_input[:, :-1]
-                tgt = t_input[:, 1:]
-
-                v = torch.randn(1, 1, 768).to(self.app.device) * 0.01
-                a = torch.randn(1, 1, 128).to(self.app.device) * 0.01
-                c = torch.zeros(1, 1, 64).to(self.app.device)
-
-                opt.zero_grad()
-
-                with autocast():
-                    logits, _, _ = student(v, a, inp, c)
-                    offset = (v.shape[1]) + (a.shape[1]) + (c.shape[1])
-                    logits_text = logits[:, offset: offset + inp.shape[1], :]
-                    loss = F.cross_entropy(logits_text.reshape(-1, logits_text.size(-1)), tgt.reshape(-1))
-
-                scaler.scale(loss).backward()
-                scaler.unscale_(opt)
-                torch.nn.utils.clip_grad_norm_(student.parameters(), 1.0)
-                scaler.step(opt)
-                scaler.update()
-
-                cycles += 1
-
-                # --- LOGGING ---
-                clean_text = generated_text.replace('\n', ' ').strip()
-                if len(clean_text) > 60: clean_text = clean_text[:60] + "..."
-                self.parent.after(0, lambda l=loss.item(), t=clean_text: self._log(f"Loss: {l:.4f} | {t}", "gen"))
-
-                # --- HARVEST & ROTATION ---
-                if self.harvest_enabled.get():
-                    try:
-                        # Check file size (Rotation)
-                        if os.path.exists(harvest_path) and os.path.getsize(harvest_path) > self.max_file_size:
-                            harvest_part += 1
-                            harvest_path = os.path.join(self.harvest_dir, f"{harvest_base}_p{harvest_part}.txt")
-                            self.parent.after(0, lambda p=harvest_part: self._log(f"HARVEST: Rotating to Part {p}",
-                                                                                  "harvest"))
-
-                        with open(harvest_path, "a", encoding="utf-8") as f:
-                            f.write(generated_text + "\n<|endoftext|>\n")
-                    except Exception as e:
-                        print(f"Harvest Error: {e}")
-
-                # --- AUTO-SAVE BRAIN ---
-                if self.autosave_enabled.get():
-                    interval = self.save_interval.get()
-                    if interval > 0 and cycles % interval == 0:
-                        save_path = os.path.join(self.app.paths['lobes'], f"brain_lobe_{s_id}.pt")
-                        genome = self.app.lobe_genomes.get(s_id, "Unknown")
-                        torch.save({"genome": genome, "state_dict": student.state_dict()}, save_path)
-                        self.parent.after(0, lambda c=cycles: self._log(f"AUTO-SAVE: Lobe {s_id} saved at cycle {c}",
-                                                                        "save"))
-
-                time.sleep(0.05)
-
-            except Exception as e:
-                print(e)
-                self.parent.after(0, lambda: self._log("Sync Glitch (Skipping Cycle)", "warn"))
-                time.sleep(1)
-
-        # --- RESTORE SENSES ---
-        try:
-            if hasattr(student, 'vis_emb'):
-                for p in student.vis_emb.parameters(): p.requires_grad = True
-            if hasattr(student, 'aud_emb'):
-                for p in student.aud_emb.parameters(): p.requires_grad = True
-        except:
-            pass
-
-        self.is_running = False
-        self.parent.after(0, lambda: self.btn_start.config(text="INITIATE SYMBIOSIS", state="normal"))
-        self.parent.after(0, lambda: self._log("Link Severed. Senses Unlocked.", "info"))

@@ -13,318 +13,320 @@ for experimenting with hybrid autoregressive + diffusion architectures,
 persistent memory graphs, and local multimodal training.
 """
 
+"""
+AEIOU Brain — Local Multimodal AI Ecosystem
+
+Copyright © 2026 Frederick von Rönge
+GitHub: https://github.com/vonronge/aeiou-brain
+
+The General Factory:
+Standardizes loose raw data (Images & Text) for the training pipeline.
+- Images: Converted to PNG, resized to standard dimensions, stripped of metadata.
+- Text: Converted to UTF-8, chunked into context-window-friendly blocks.
+"""
+
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, filedialog, messagebox
+from PIL import Image, ImageOps
 import os
-import threading
 import shutil
-import time
+import threading
 import queue
 import traceback
-
-
-# --- HEADLESS HELPER ---
-class MockVar:
-    def __init__(self, value=None): self._val = value
-
-    def set(self, value): self._val = value
-
-    def get(self): return self._val
+from datetime import datetime
 
 
 class Plugin:
     def __init__(self, parent, app):
         self.parent = parent
         self.app = app
-        self.name = "Data Factory"
-        self.running = False
+        self.name = "General Factory"
 
-        # --- DYNAMIC PATHS ---
-        # Get default from GUI.py logic (configurable via settings.json)
-        default_data = self.app.paths.get("data", os.path.join(self.app.paths["root"], "Training_Data"))
+        self.is_processing = False
+        self.stop_requested = False
+        self.work_queue = []
+        self.update_queue = queue.Queue()
 
-        # Default Source: "Chaos_Buffer" inside Training_Data
-        chaos_default = os.path.join(default_data, "Chaos_Buffer")
-        if not os.path.exists(chaos_default):
-            try:
-                os.makedirs(chaos_default)
-            except:
-                pass
+        # --- SETTINGS ---
+        default_in = self.app.paths.get("data", "")
+        default_out = os.path.join(default_in, "Processed_General")
 
-        # --- INITIALIZE VARIABLES ---
-        if self.parent is None:
-            # Headless Mode
-            self.chaos_folder = MockVar(chaos_default)
-            self.target_folder = MockVar(default_data)
-            self.status_var = MockVar("Ready.")
-            self.progress_var = MockVar(0.0)
-        else:
-            # GUI Mode
-            self.chaos_folder = tk.StringVar(value=chaos_default)
-            self.target_folder = tk.StringVar(value=default_data)
-            self.status_var = tk.StringVar(value="Ready.")
-            self.progress_var = tk.DoubleVar(value=0.0)
+        self.input_dir = tk.StringVar(value=default_in)
+        self.output_dir = tk.StringVar(value=default_out)
+
+        self.target_dim = tk.IntVar(value=512)
+        self.chunk_size = tk.IntVar(value=1024)  # Characters per text chunk
+        self.overlap = tk.IntVar(value=100)
+        self.skip_existing = tk.BooleanVar(value=True)
+        self.convert_grayscale = tk.BooleanVar(value=False)
 
         self._setup_ui()
+        if self.parent:
+            self.parent.after(100, self._process_gui_queue)
 
     def _setup_ui(self):
         if self.parent is None: return
 
-        # 1. Source (Chaos)
-        fr_src = ttk.LabelFrame(self.parent, text="Incoming Data (Source)", padding=15)
-        fr_src.pack(fill="x", padx=10, pady=10)
+        scale = getattr(self.app, 'ui_scale', 1.0)
 
-        ttk.Label(fr_src, text="Source Folder (The Chaos):").pack(anchor="w")
-        row_src = ttk.Frame(fr_src)
-        row_src.pack(fill="x", pady=5)
+        # 1. PATH CONFIG
+        fr_io = ttk.LabelFrame(self.parent, text="Assembly Line Configuration", padding=10)
+        fr_io.pack(fill="x", padx=10, pady=5)
 
-        e_chaos = ttk.Entry(row_src, textvariable=self.chaos_folder)
-        e_chaos.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        ttk.Button(row_src, text="📂", width=4, command=lambda: self._browse(self.chaos_folder)).pack(side="left")
+        # Input
+        r1 = ttk.Frame(fr_io)
+        r1.pack(fill="x", pady=2)
+        ttk.Label(r1, text="Raw Source:", width=12).pack(side="left")
+        ttk.Entry(r1, textvariable=self.input_dir).pack(side="left", fill="x", expand=True, padx=5)
+        ttk.Button(r1, text="📂", width=4, command=lambda: self._browse(self.input_dir)).pack(side="left")
 
-        # 2. Target (Organized)
-        fr_tgt = ttk.LabelFrame(self.parent, text="Structured Storage (Target)", padding=15)
-        fr_tgt.pack(fill="x", padx=10, pady=10)
+        # Output
+        r2 = ttk.Frame(fr_io)
+        r2.pack(fill="x", pady=2)
+        ttk.Label(r2, text="Output Dest:", width=12).pack(side="left")
+        ttk.Entry(r2, textvariable=self.output_dir).pack(side="left", fill="x", expand=True, padx=5)
+        ttk.Button(r2, text="📂", width=4, command=lambda: self._browse(self.output_dir)).pack(side="left")
 
-        ttk.Label(fr_tgt, text="Destination Folder:").pack(anchor="w")
-        row_tgt = ttk.Frame(fr_tgt)
-        row_tgt.pack(fill="x", pady=5)
+        # 2. PROCESSING RULES
+        fr_rules = ttk.LabelFrame(self.parent, text="Standardization Rules", padding=10)
+        fr_rules.pack(fill="x", padx=10, pady=5)
 
-        e_tgt = ttk.Entry(row_tgt, textvariable=self.target_folder)
-        e_tgt.pack(side="left", fill="x", expand=True, padx=(0, 5))
-        ttk.Button(row_tgt, text="📂", width=4, command=lambda: self._browse(self.target_folder)).pack(side="left")
+        # Image Rules
+        r_img = ttk.Frame(fr_rules)
+        r_img.pack(fill="x", pady=2)
+        ttk.Label(r_img, text="[Images] Max Dimension:", width=22).pack(side="left")
+        ttk.Spinbox(r_img, from_=256, to=2048, increment=64, textvariable=self.target_dim, width=6).pack(side="left")
+        ttk.Checkbutton(r_img, text="Force Grayscale", variable=self.convert_grayscale).pack(side="left", padx=15)
 
-        # 3. Operations
-        fr_ops = ttk.LabelFrame(self.parent, text="Factory Operations", padding=15)
-        fr_ops.pack(fill="both", expand=True, padx=10, pady=10)
+        # Text Rules
+        r_txt = ttk.Frame(fr_rules)
+        r_txt.pack(fill="x", pady=2)
+        ttk.Label(r_txt, text="[Text] Chunk Size (chars):", width=22).pack(side="left")
+        ttk.Spinbox(r_txt, from_=100, to=10000, increment=100, textvariable=self.chunk_size, width=6).pack(side="left")
+        ttk.Label(r_txt, text="Overlap:").pack(side="left", padx=(10, 5))
+        ttk.Entry(r_txt, textvariable=self.overlap, width=5).pack(side="left")
 
-        btn_grid = ttk.Frame(fr_ops)
-        btn_grid.pack(fill="x", pady=10)
+        # Global Rules
+        r_glob = ttk.Frame(fr_rules)
+        r_glob.pack(fill="x", pady=(10, 0))
+        ttk.Checkbutton(r_glob, text="Skip Existing Files (Incremental Update)", variable=self.skip_existing).pack(
+            side="left")
 
-        self.btn_sort = ttk.Button(btn_grid, text="✨ SORT & CLEAN", command=self._start_sort)
-        self.btn_sort.pack(side="left", fill="x", expand=True, padx=5)
+        # 3. QUEUE
+        fr_list = ttk.Frame(self.parent)
+        fr_list.pack(fill="both", expand=True, padx=10, pady=5)
 
-        self.btn_flat = ttk.Button(btn_grid, text="🔨 FLATTEN DIRECTORY", command=self._start_flatten)
-        self.btn_flat.pack(side="left", fill="x", expand=True, padx=5)
+        tb = ttk.Frame(fr_list)
+        tb.pack(fill="x", pady=2)
+        ttk.Button(tb, text="SCAN FOLDER", command=self._scan).pack(side="left", fill="x", expand=True)
+        self.lbl_count = ttk.Label(tb, text="0 files queued", foreground=self.app.colors["ACCENT"])
+        self.lbl_count.pack(side="left", padx=10)
 
-        # Status & Progress
-        self.pb = ttk.Progressbar(fr_ops, variable=self.progress_var, maximum=100)
-        self.pb.pack(fill="x", pady=(20, 5))
+        # Treeview
+        cols = ("File", "Type", "Status")
+        style = ttk.Style()
+        row_h = int(25 * scale)
+        style.configure("Factory.Treeview", rowheight=row_h, font=("Segoe UI", int(10 * scale)))
+        style.configure("Factory.Treeview.Heading", font=("Segoe UI", int(11 * scale), "bold"))
 
-        lbl_stat = ttk.Label(fr_ops, textvariable=self.status_var, foreground=self.app.colors["ACCENT"],
-                             font=("Segoe UI", 10))
-        lbl_stat.pack()
+        self.tree = ttk.Treeview(fr_list, columns=cols, show="headings", height=8, style="Factory.Treeview")
+        self.tree.heading("File", text="Filename")
+        self.tree.heading("Type", text="Type")
+        self.tree.heading("Status", text="Status")
 
+        self.tree.column("File", width=int(400 * scale))
+        self.tree.column("Type", width=int(80 * scale), anchor="center")
+        self.tree.column("Status", width=int(150 * scale), anchor="center")
+
+        sb = ttk.Scrollbar(fr_list, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+
+        self.tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
+        # 4. ACTION
+        fr_run = ttk.Frame(self.parent, padding=10)
+        fr_run.pack(fill="x", pady=5)
+
+        self.btn_run = ttk.Button(fr_run, text="START PRODUCTION", command=self._toggle_run, state="disabled")
+        self.btn_run.pack(side="left", fill="x", expand=True, padx=5)
+
+        self.progress = ttk.Progressbar(fr_run, orient="horizontal", mode="determinate")
+        self.progress.pack(side="left", fill="x", expand=True, padx=5)
+
+        self.lbl_status = ttk.Label(self.parent, text="Ready.", foreground=self.app.colors["FG_DIM"], anchor="w")
+        self.lbl_status.pack(fill="x", padx=15, pady=(0, 10))
+
+    # --- HELPERS ---
     def _browse(self, var):
         d = filedialog.askdirectory(initialdir=var.get())
         if d: var.set(d)
 
-    def _toggle_ui(self, state):
-        if self.parent is None: return
-        s = "normal" if state else "disabled"
-        self.btn_sort.config(state=s)
-        self.btn_flat.config(state=s)
+    def _log(self, msg, tag="INFO"):
+        self.update_queue.put(lambda: self.lbl_status.config(text=msg))
+        if self.app.golgi:
+            # Route to Golgi
+            level = "INFO"
+            if tag == "ERROR":
+                level = "ERROR"
+            elif tag == "SUCCESS":
+                level = "SUCCESS"
+            self.app.golgi._dispatch(level, msg, source="Factory")
 
-    # --- SORT LOGIC ---
-    def _start_sort(self):
-        if self.running: return
+    def _process_gui_queue(self):
+        while not self.update_queue.empty():
+            try:
+                fn = self.update_queue.get_nowait()
+                fn()
+            except:
+                break
+        if self.parent:
+            self.parent.after(100, self._process_gui_queue)
 
-        src = self.chaos_folder.get()
-        tgt = self.target_folder.get()
+    def _update_tree(self, iid, col, val):
+        self.update_queue.put(lambda: self.tree.set(iid, col, val))
 
-        if not os.path.exists(src):
-            if self.parent:
-                messagebox.showerror("Error", "Source folder does not exist.")
-            else:
-                print("Error: Source folder missing.")
+    # --- SCANNING ---
+    def _scan(self):
+        folder = self.input_dir.get()
+        if not os.path.exists(folder):
+            messagebox.showerror("Error", "Input folder does not exist.")
             return
 
-        self.running = True
-        self._toggle_ui(False)
-        self.status_var.set("Initializing Sorter...")
-        self.progress_var.set(0)
+        for i in self.tree.get_children(): self.tree.delete(i)
+        self.work_queue = []
 
-        threading.Thread(target=self._worker_sort, args=(src, tgt), daemon=True).start()
+        img_exts = {".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"}
+        txt_exts = {".txt", ".md", ".json", ".csv", ".py", ".html", ".xml"}
 
-    def _worker_sort(self, src, tgt):
-        try:
-            if not os.path.exists(tgt): os.makedirs(tgt)
-
-            # Definitions
-            categories = {
-                'Images': ['.jpg', '.jpeg', '.png', '.bmp', '.gif', '.webp', '.tiff'],
-                'Audio': ['.mp3', '.wav', '.flac', '.ogg', '.m4a', '.aac'],
-                'Text': ['.txt', '.md', '.pdf', '.epub', '.json', '.csv', '.doc', '.docx', '.srt', '.vtt', '.ass'],
-                'Video': ['.mp4', '.mkv', '.avi', '.mov', '.webm'],
-                'Code': ['.py', '.js', '.html', '.css', '.cpp', '.h', '.java'],
-                'Archives': ['.zip', '.rar', '.7z', '.tar', '.gz']
-            }
-
-            # Create subfolders
-            for cat in categories:
-                p = os.path.join(tgt, cat)
-                if not os.path.exists(p): os.makedirs(p)
-
-            # Scan
-            files_to_move = []
-            for root, _, files in os.walk(src):
-                for f in files:
-                    files_to_move.append(os.path.join(root, f))
-
-            total = len(files_to_move)
-            if total == 0:
-                if self.parent:
-                    self.parent.after(0, lambda: self.status_var.set("Source is empty."))
-                    self.parent.after(0, lambda: self._toggle_ui(True))
-                else:
-                    print("Source is empty.")
-                self.running = False
-                return
-
-            moved_count = 0
-
-            for i, file_path in enumerate(files_to_move):
-                _, ext = os.path.splitext(file_path)
+        count = 0
+        for root, _, files in os.walk(folder):
+            for f in files:
+                _, ext = os.path.splitext(f)
                 lext = ext.lower()
+                full_path = os.path.join(root, f)
 
-                dest_cat = "Misc"
-                for cat, exts in categories.items():
-                    if lext in exts:
-                        dest_cat = cat
-                        break
+                ftype = None
+                if lext in img_exts:
+                    ftype = "Image"
+                elif lext in txt_exts:
+                    ftype = "Text"
 
-                # Setup destination
-                dest_dir = os.path.join(tgt, dest_cat)
-                if not os.path.exists(dest_dir): os.makedirs(dest_dir)
+                if ftype:
+                    self.tree.insert("", "end", iid=full_path, values=(f, ftype, "Queued"))
+                    self.work_queue.append((full_path, ftype))
+                    count += 1
 
-                fname = os.path.basename(file_path)
-                dest_path = os.path.join(dest_dir, fname)
+        self.lbl_count.config(text=f"{count} files queued")
+        if count > 0:
+            self.btn_run.config(state="normal")
+        self._log(f"Scan complete. Found {count} items.")
 
-                # Handle collision
-                if os.path.exists(dest_path):
-                    base, ex = os.path.splitext(fname)
-                    ts = int(time.time() * 1000)
-                    dest_path = os.path.join(dest_dir, f"{base}_{ts}{ex}")
+    # --- PROCESSING ---
+    def _toggle_run(self):
+        if self.is_processing:
+            self.stop_requested = True
+            self.btn_run.config(text="STOPPING...")
+        else:
+            self.stop_requested = False
+            self.is_processing = True
+            self.btn_run.config(text="STOP PRODUCTION")
+            threading.Thread(target=self._worker, daemon=True).start()
 
-                try:
-                    shutil.move(file_path, dest_path)
-                    moved_count += 1
-                except Exception as e:
-                    print(f"Move failed for {fname}: {e}")
+    def _worker(self):
+        out_root = self.output_dir.get()
+        if not os.path.exists(out_root):
+            try:
+                os.makedirs(out_root)
+            except:
+                pass
 
-                # UI Update
-                if self.parent and i % 5 == 0:
-                    pct = (i / total) * 100
-                    self.parent.after(0, lambda p=pct, m=moved_count: [
-                        self.progress_var.set(p),
-                        self.status_var.set(f"Sorting... ({m}/{total})")
-                    ])
+        total = len(self.work_queue)
+        target_s = self.target_dim.get()
+        chunk_s = self.chunk_size.get()
+        ovlp = self.overlap.get()
+        skip = self.skip_existing.get()
+        gray = self.convert_grayscale.get()
 
-            # Cleanup Empty Dirs in Source
-            for root, dirs, files in os.walk(src, topdown=False):
-                for d in dirs:
+        for idx, (path, ftype) in enumerate(self.work_queue):
+            if self.stop_requested: break
+
+            fname = os.path.basename(path)
+            self._update_tree(path, "Status", "Processing...")
+            self._log(f"Processing {fname} ({idx + 1}/{total})...")
+
+            try:
+                if ftype == "Image":
+                    # Image Processing Logic
+                    dest_path = os.path.join(out_root, os.path.splitext(fname)[0] + ".png")
+
+                    if skip and os.path.exists(dest_path):
+                        self._update_tree(path, "Status", "Skipped")
+                    else:
+                        with Image.open(path) as img:
+                            # Convert to RGB (remove alpha)
+                            if img.mode in ("RGBA", "P"): img = img.convert("RGB")
+
+                            # Grayscale check
+                            if gray: img = ImageOps.grayscale(img)
+
+                            # Resize (Downscale only)
+                            w, h = img.size
+                            if max(w, h) > target_s:
+                                ratio = target_s / max(w, h)
+                                new_size = (int(w * ratio), int(h * ratio))
+                                img = img.resize(new_size, Image.Resampling.LANCZOS)
+
+                            img.save(dest_path, "PNG", optimize=True)
+                        self._update_tree(path, "Status", "Done")
+
+                elif ftype == "Text":
+                    # Text Chunking Logic
                     try:
-                        os.rmdir(os.path.join(root, d))
+                        with open(path, 'r', encoding='utf-8', errors='ignore') as f:
+                            raw = f.read()
                     except:
-                        pass
+                        # Fallback for weird encodings
+                        with open(path, 'r', encoding='latin-1') as f:
+                            raw = f.read()
 
-            if self.parent:
-                self.parent.after(0, lambda m=moved_count: self.status_var.set(f"Done! Organized {m} files."))
-                self.parent.after(0, lambda: self.progress_var.set(100))
-            else:
-                print(f"Done! Organized {moved_count} files.")
+                    # Clean whitespace
+                    clean = " ".join(raw.split())
 
-        except Exception as e:
-            traceback.print_exc()
-            if self.parent:
-                self.parent.after(0, lambda err=str(e): self.status_var.set(f"Error: {err}"))
-        finally:
-            self.running = False
-            if self.parent:
-                self.parent.after(0, lambda: self._toggle_ui(True))
+                    if len(clean) < 50:
+                        self._update_tree(path, "Status", "Ignored (Tiny)")
+                    else:
+                        base_name = os.path.splitext(fname)[0]
+                        chunks = []
+                        start = 0
+                        while start < len(clean):
+                            end = min(start + chunk_s, len(clean))
+                            chunks.append(clean[start:end])
+                            start += (chunk_s - ovlp)
 
-    # --- FLATTEN LOGIC ---
-    def _start_flatten(self):
-        if self.running: return
+                        # Save chunks
+                        for i, c in enumerate(chunks):
+                            c_name = f"{base_name}_part{str(i).zfill(3)}.txt"
+                            c_path = os.path.join(out_root, c_name)
+                            if skip and os.path.exists(c_path): continue
 
-        tgt = self.target_folder.get()
-        if not os.path.exists(tgt): return
+                            with open(c_path, 'w', encoding='utf-8') as f:
+                                f.write(c)
 
-        if self.parent:
-            if not messagebox.askyesno("Confirm Flatten",
-                                       f"This will move ALL files from subfolders of:\n{tgt}\n\nInto the root of that folder.\nAre you sure?"):
-                return
+                        self._update_tree(path, "Status", f"Done ({len(chunks)} chunks)")
 
-        self.running = True
-        self._toggle_ui(False)
-        self.status_var.set("Flattening...")
-        self.progress_var.set(0)
+                # Update Progress
+                pct = ((idx + 1) / total) * 100
+                self.update_queue.put(lambda v=pct: self.progress.configure(value=v))
 
-        threading.Thread(target=self._worker_flatten, args=(tgt,), daemon=True).start()
+            except Exception as e:
+                self._update_tree(path, "Status", "Failed")
+                self._log(f"Error on {fname}: {e}", "ERROR")
 
-    def _worker_flatten(self, root_dir):
-        try:
-            files_to_move = []
-            # Walk topdown=False so we can delete dirs after
-            for root, dirs, files in os.walk(root_dir, topdown=False):
-                if root == root_dir: continue  # Skip root files, they are fine
-
-                for f in files:
-                    files_to_move.append(os.path.join(root, f))
-
-            total = len(files_to_move)
-            moved = 0
-
-            for i, src_path in enumerate(files_to_move):
-                fname = os.path.basename(src_path)
-                dest_path = os.path.join(root_dir, fname)
-
-                # Collision handling
-                if os.path.exists(dest_path):
-                    base, ext = os.path.splitext(fname)
-                    # Use parent folder name to disambiguate
-                    parent_name = os.path.basename(os.path.dirname(src_path))
-                    dest_path = os.path.join(root_dir, f"{base}_{parent_name}{ext}")
-
-                    # Double check
-                    if os.path.exists(dest_path):
-                        ts = int(time.time())
-                        dest_path = os.path.join(root_dir, f"{base}_{ts}{ext}")
-
-                try:
-                    shutil.move(src_path, dest_path)
-                    moved += 1
-                except:
-                    pass
-
-                if self.parent and i % 10 == 0:
-                    pct = (i / total) * 100
-                    self.parent.after(0, lambda p=pct: self.progress_var.set(p))
-
-            # Cleanup Empty Dirs
-            cleaned = 0
-            for root, dirs, files in os.walk(root_dir, topdown=False):
-                if root == root_dir: continue
-                try:
-                    os.rmdir(root)
-                    cleaned += 1
-                except:
-                    pass
-
-            if self.parent:
-                self.parent.after(0, lambda m=moved, c=cleaned: self.status_var.set(
-                    f"Flattened {m} files. Removed {c} folders."))
-                self.parent.after(0, lambda: self.progress_var.set(100))
-            else:
-                print(f"Flattened {moved} files.")
-
-        except Exception as e:
-            if self.parent:
-                self.parent.after(0, lambda err=str(e): self.status_var.set(f"Error: {err}"))
-        finally:
-            self.running = False
-            if self.parent:
-                self.parent.after(0, lambda: self._toggle_ui(True))
+        self.is_processing = False
+        self.update_queue.put(lambda: self.btn_run.config(text="START PRODUCTION"))
+        self._log("Factory Run Complete.", "SUCCESS")
+        self.update_queue.put(lambda: self.progress.configure(value=0))
 
     def on_theme_change(self):
         pass

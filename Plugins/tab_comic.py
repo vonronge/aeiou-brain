@@ -12,280 +12,293 @@ This file is part of AEIOU Brain, a personal open-source project
 for experimenting with hybrid autoregressive + diffusion architectures,
 persistent memory graphs, and local multimodal training.
 """
+"""
+AEIOU Brain — Local Multimodal AI Ecosystem
+
+Copyright © 2026 Frederick von Rönge
+GitHub: https://github.com/vonronge/aeiou-brain
+
+The Comic Architect:
+A specialized sequencer for Cytosis.
+Generates multi-panel visual narratives (Comics/Manga).
+- Defines a 4-Panel Script.
+- Generates consistency across panels (using Seed/Lobe).
+- Stitches results into a page layout.
+"""
+
 import tkinter as tk
-from tkinter import ttk, messagebox
+from tkinter import ttk, filedialog, messagebox
+from PIL import Image, ImageTk, ImageDraw, ImageFont
 import threading
+import queue
 import os
 import time
-import torch
-from PIL import Image, ImageTk
-import traceback
 from datetime import datetime
-
-
-# --- HEADLESS HELPER ---
-class MockVar:
-    def __init__(self, value=None): self._val = value
-
-    def set(self, value): self._val = value
-
-    def get(self): return self._val
 
 
 class Plugin:
     def __init__(self, parent, app):
         self.parent = parent
         self.app = app
-        self.name = "Comic Factory"
-        self.is_running = False
+        self.name = "Comic Architect"
+
+        self.is_rendering = False
         self.stop_requested = False
-        self.image_refs = []  # Keep references to prevent GC
+        self.update_queue = queue.Queue()
 
-        # --- DYNAMIC PATHS ---
-        default_data = self.app.paths.get("data", os.path.join(self.app.paths["root"], "Training_Data"))
-        self.output_dir = os.path.join(default_data, "Comics_Output")
-        if not os.path.exists(self.output_dir):
-            try:
-                os.makedirs(self.output_dir)
-            except:
-                pass
+        # Result Cache
+        self.panel_images = [None] * 4
+        self.final_page = None
 
-        # --- STATE ---
-        if self.parent is None:
-            # Headless Defaults
-            self.seed_prompt = MockVar("A robot discovering a flower in a cyberpunk city")
-            self.num_panels = MockVar(4)
-            self.style_prompt = MockVar("comic book style, vibrant colors, detailed line art")
-            self.status_var = MockVar("Ready.")
-        else:
-            # GUI Defaults
-            self.seed_prompt = tk.StringVar(value="A robot discovering a flower in a cyberpunk city")
-            self.num_panels = tk.IntVar(value=4)
-            self.style_prompt = tk.StringVar(value="comic book style, vibrant colors, detailed line art")
-            self.status_var = tk.StringVar(value="Ready.")
+        # --- SETTINGS ---
+        self.style_prompt = tk.StringVar(value="black and white manga style, high contrast, ink lines")
+        self.neg_prompt = tk.StringVar(value="color, photorealistic, 3d render, blurry")
+        self.steps = tk.IntVar(value=25)
+        self.cfg = tk.DoubleVar(value=7.0)
+        self.seed = tk.IntVar(value=-1)  # Fixed seed ensures character consistency across panels
+
+        # Panel Scripts
+        self.script_p1 = tk.StringVar(value="Panel 1: A cybernetic detective stands in rain")
+        self.script_p2 = tk.StringVar(value="Panel 2: Close up on his glowing red eye")
+        self.script_p3 = tk.StringVar(value="Panel 3: He holds a datapad showing 'ERROR'")
+        self.script_p4 = tk.StringVar(value="Panel 4: He looks up at a massive neon tower")
 
         self._setup_ui()
+        if self.parent:
+            self.parent.after(100, self._process_gui_queue)
 
     def _setup_ui(self):
         if self.parent is None: return
+        scale = getattr(self.app, 'ui_scale', 1.0)
 
-        # Main Layout: Left (Controls) | Right (Comic Strip View)
-        panel = ttk.PanedWindow(self.parent, orient="horizontal")
-        panel.pack(fill="both", expand=True, padx=10, pady=10)
+        # Layout: Script (Left) | Preview (Right)
+        split = ttk.PanedWindow(self.parent, orient="horizontal")
+        split.pack(fill="both", expand=True, padx=10, pady=10)
 
-        left = ttk.Frame(panel, width=350)
-        right = ttk.Frame(panel)
-        panel.add(left, weight=1)
-        panel.add(right, weight=3)
+        # --- LEFT: SCRIPTING ---
+        fr_script = ttk.Frame(split)
+        split.add(fr_script, weight=1)
 
-        # --- LEFT: CONTROLS ---
-        fr_input = ttk.LabelFrame(left, text="Story Settings", padding=15)
-        fr_input.pack(fill="x", pady=5)
+        # Global Style
+        fr_style = ttk.LabelFrame(fr_script, text="Art Direction", padding=10)
+        fr_style.pack(fill="x", pady=5)
 
-        ttk.Label(fr_input, text="Story Concept:").pack(anchor="w")
-        self.txt_seed = tk.Text(fr_input, height=4, font=("Segoe UI", 10), wrap="word")
-        self.txt_seed.insert("1.0", self.seed_prompt.get())
-        self.txt_seed.pack(fill="x", pady=5)
+        ttk.Label(fr_style, text="Global Style:").pack(anchor="w")
+        ttk.Entry(fr_style, textvariable=self.style_prompt).pack(fill="x", pady=(0, 5))
 
-        ttk.Label(fr_input, text="Art Style:").pack(anchor="w", pady=(10, 0))
-        ttk.Entry(fr_input, textvariable=self.style_prompt).pack(fill="x", pady=5)
+        ttk.Label(fr_style, text="Negative:").pack(anchor="w")
+        ttk.Entry(fr_style, textvariable=self.neg_prompt).pack(fill="x")
 
-        ttk.Label(fr_input, text="Panels:").pack(anchor="w", pady=(10, 0))
-        ttk.Spinbox(fr_input, from_=1, to=10, textvariable=self.num_panels).pack(fill="x", pady=5)
+        # Panels
+        fr_panels = ttk.LabelFrame(fr_script, text="Storyboard", padding=10)
+        fr_panels.pack(fill="x", pady=5)
 
-        self.btn_gen = ttk.Button(left, text="GENERATE COMIC", command=self._start_generation)
-        self.btn_gen.pack(fill="x", pady=20)
+        def add_panel_in(lbl, var):
+            f = ttk.Frame(fr_panels)
+            f.pack(fill="x", pady=2)
+            ttk.Label(f, text=lbl, width=8, font=("Segoe UI", int(9 * scale), "bold")).pack(side="left")
+            ttk.Entry(f, textvariable=var).pack(side="left", fill="x", expand=True)
 
-        self.lbl_status = ttk.Label(left, textvariable=self.status_var, foreground=self.app.colors["ACCENT"],
-                                    wraplength=300)
-        self.lbl_status.pack(pady=10)
+        add_panel_in("Panel 1:", self.script_p1)
+        add_panel_in("Panel 2:", self.script_p2)
+        add_panel_in("Panel 3:", self.script_p3)
+        add_panel_in("Panel 4:", self.script_p4)
 
-        # --- RIGHT: PREVIEW AREA ---
-        fr_view = ttk.LabelFrame(right, text="Comic Strip Preview", padding=10)
-        fr_view.pack(fill="both", expand=True)
+        # Tech Settings
+        fr_tech = ttk.LabelFrame(fr_script, text="Render Config", padding=10)
+        fr_tech.pack(fill="x", pady=5)
 
-        # Scrollable Canvas for vertical strip
-        self.canvas = tk.Canvas(fr_view, bg=self.app.colors["BG_CARD"], highlightthickness=0)
-        sb = ttk.Scrollbar(fr_view, orient="vertical", command=self.canvas.yview)
+        r1 = ttk.Frame(fr_tech)
+        r1.pack(fill="x")
+        ttk.Label(r1, text="Steps:").pack(side="left")
+        ttk.Spinbox(r1, from_=10, to=100, textvariable=self.steps, width=5).pack(side="left", padx=5)
 
-        self.scroll_frame = ttk.Frame(self.canvas)
-        self.canvas.create_window((0, 0), window=self.scroll_frame, anchor="nw")
+        ttk.Label(r1, text="CFG:").pack(side="left", padx=(10, 0))
+        ttk.Spinbox(r1, from_=1.0, to=20.0, textvariable=self.cfg, width=5, increment=0.5).pack(side="left", padx=5)
 
-        self.canvas.configure(yscrollcommand=sb.set)
-        self.scroll_frame.bind("<Configure>", lambda e: self.canvas.configure(scrollregion=self.canvas.bbox("all")))
+        ttk.Label(r1, text="Seed:").pack(side="left", padx=(10, 0))
+        ttk.Entry(r1, textvariable=self.seed, width=10).pack(side="left", padx=5)
 
-        self.canvas.pack(side="left", fill="both", expand=True)
-        sb.pack(side="right", fill="y")
+        # Buttons
+        self.btn_draw = ttk.Button(fr_script, text="🎨 DRAW PAGE", command=self._start_render)
+        self.btn_draw.pack(fill="x", pady=20)
 
-    def _update_status(self, msg):
-        if self.parent:
-            self.status_var.set(msg)
-            self.parent.update_idletasks()
-        else:
-            print(f"[Comic] {msg}")
+        self.lbl_status = ttk.Label(fr_script, text="Ready.", foreground=self.app.colors["FG_DIM"], anchor="center")
+        self.lbl_status.pack(fill="x")
 
-    def _start_generation(self):
-        if self.is_running: return
+        # --- RIGHT: PAGE PREVIEW ---
+        fr_view = ttk.LabelFrame(split, text="Page Layout", padding=10)
+        split.add(fr_view, weight=3)
 
-        # Get text from widget if GUI
-        if self.parent:
-            seed = self.txt_seed.get("1.0", tk.END).strip()
-            self.seed_prompt.set(seed)
+        self.canvas = tk.Canvas(fr_view, bg="#202020", highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
 
+        # Toolbar
+        tb = ttk.Frame(fr_view)
+        tb.pack(fill="x", pady=5)
+        ttk.Button(tb, text="💾 SAVE COMIC", command=self._save_page).pack(side="right")
+
+    # --- ACTIONS ---
+    def _start_render(self):
+        # Validate Lobe
         active_id = self.app.active_lobe.get()
-        brain = self.app.lobes[active_id]
-
-        if not brain:
-            messagebox.showerror("Error", "No Lobe Loaded.")
+        lobe = self.app.lobe_manager.get_lobe(active_id)
+        if not lobe:
+            messagebox.showerror("Void", "No Lobe Loaded.")
             return
 
-        # Check Capabilities
-        self.is_diffusion = hasattr(brain, 'timestep_emb') or (self.app.lobe_types.get(active_id) == "diffusion")
+        self.is_rendering = True
+        self.stop_requested = False
+        self.btn_draw.config(state="disabled", text="INKING...")
 
-        self.is_running = True
-        if self.parent: self.btn_gen.config(state="disabled")
+        # Clear old
+        self.panel_images = [None] * 4
+        self.final_page = None
+        self.canvas.delete("all")
 
-        # Clear previous
-        if self.parent:
-            for w in self.scroll_frame.winfo_children(): w.destroy()
-            self.image_refs = []
+        threading.Thread(target=self._worker, args=(lobe,), daemon=True).start()
 
-        threading.Thread(target=self._worker_comic, daemon=True).start()
-
-    def _worker_comic(self):
+    def _worker(self, lobe):
         try:
-            brain = self.app.lobes[self.app.active_lobe.get()]
-            ribosome = self.app.ribosome
+            from Organelles.cytosis import DreamConfig
 
-            prompt = self.seed_prompt.get()
+            prompts = [
+                self.script_p1.get(),
+                self.script_p2.get(),
+                self.script_p3.get(),
+                self.script_p4.get()
+            ]
             style = self.style_prompt.get()
-            panels = self.num_panels.get()
+            neg = self.neg_prompt.get()
+            seed_base = self.seed.get()
 
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            comic_folder = os.path.join(self.output_dir, f"Comic_{ts}")
-            os.makedirs(comic_folder, exist_ok=True)
+            # If seed is -1, generate a random base seed for the PAGE
+            # This ensures the page has a consistent 'vibe' if we increment it per panel
+            import random
+            if seed_base == -1: seed_base = random.randint(0, 2 ** 32 - 1)
 
-            self._update_status("Drafting Storyboard...")
+            for i, p_text in enumerate(prompts):
+                if self.stop_requested: break
 
-            # 1. Generate Storyboard (Text)
-            # If Diffusion model only, skip text gen or use internal prompt logic
-            storyboard = []
-            if not self.is_diffusion:
-                # AR Model: Ask it to split story
-                story_prompt = f"Create a {panels}-panel comic script about: {prompt}. Format: Panel 1: [Desc], Panel 2: [Desc]..."
-                story_text = self._generate_text(brain, ribosome, story_prompt, max_new=200)
+                # Combine Panel Prompt + Global Style
+                full_prompt = f"{style}, {p_text}"
 
-                # Naive parse
-                parts = story_text.split("Panel")
-                for p in parts:
-                    if len(p.strip()) > 10:
-                        storyboard.append(p.strip())
+                # Update Status
+                self.update_queue.put(lambda idx=i: self.lbl_status.config(text=f"Rendering Panel {idx + 1}/4..."))
 
-                # Fallback
-                if len(storyboard) < panels:
-                    storyboard = [f"{prompt}, scene {i + 1}" for i in range(panels)]
-            else:
-                # Diffusion Model: Just iterate variations
-                storyboard = [f"{prompt}, sequence {i + 1}" for i in range(panels)]
-
-            storyboard = storyboard[:panels]
-
-            # 2. Generate Panels
-            for i, panel_desc in enumerate(storyboard):
-                self._update_status(f"Rendering Panel {i + 1}/{panels}...")
-
-                full_prompt = f"{panel_desc}, {style}"
-
-                img = self._generate_image(brain, ribosome, full_prompt)
-
-                if img:
-                    # Save
-                    fname = f"panel_{i + 1}.png"
-                    save_path = os.path.join(comic_folder, fname)
-                    img.save(save_path)
-
-                    # Display
-                    if self.parent:
-                        self.parent.after(0, lambda image=img, txt=panel_desc: self._add_panel_to_ui(image, txt))
-
-                time.sleep(0.5)
-
-            self._update_status(f"Comic Complete! Saved to {comic_folder}")
-
-        except Exception as e:
-            self._update_status(f"Error: {e}")
-            traceback.print_exc()
-        finally:
-            self.is_running = False
-            if self.parent: self.parent.after(0, lambda: self.btn_gen.config(state="normal"))
-
-    def _generate_text(self, brain, ribosome, prompt, max_new=100):
-        ids = ribosome._tokenize(prompt)
-        t = torch.tensor(ids, device=self.app.device).unsqueeze(0)
-        v = torch.zeros(1, 1, 768).to(self.app.device)
-        a = torch.zeros(1, 1, 128).to(self.app.device)
-
-        out_ids = []
-        with self.app.gpu_lock:
-            with torch.no_grad():
-                for _ in range(max_new):
-                    logits, _, _ = brain(v, a, t)
-                    next_tok = torch.argmax(logits[:, -1, :], dim=-1)
-                    t = torch.cat([t, next_tok.unsqueeze(0)], dim=1)
-                    out_ids.append(next_tok.item())
-                    if next_tok.item() == 50256: break
-
-        return ribosome.decode(out_ids)
-
-    def _generate_image(self, brain, ribosome, prompt):
-        # Requires a model capable of image generation (Diffusion)
-        if not hasattr(brain, 'timestep_emb'):
-            return None  # AR model can't draw (yet)
-
-        ids = ribosome._tokenize(prompt)
-
-        with self.app.gpu_lock:
-            with torch.no_grad():
-                # Standard Diffusion Generation Call
-                # (Assumes brain.generate returns tokens containing image blocks)
-                tokens = brain.generate(
-                    prompt_tokens=ids,
-                    max_length=1024 + len(ids),  # Enough for 32x32 patches
-                    steps=25,
-                    temperature=1.0
+                # Create Config
+                # We increment seed slightly per panel to allow variation while keeping style
+                cfg = DreamConfig(
+                    prompt=full_prompt,
+                    negative_prompt=neg,
+                    cfg_scale=self.cfg.get(),
+                    steps=self.steps.get(),
+                    seed=seed_base + i,
+                    modality="visual"
                 )
 
-        # Extract Image from tokens
-        # Find visual tokens range
-        vis_tokens = [t for t in tokens if t >= ribosome.image_vocab_base and t < ribosome.audio_vocab_base]
+                # Call Cytosis
+                res = self.app.cytosis.dream(lobe, cfg)
+                if res.get('image'):
+                    self.panel_images[i] = res['image']
+                    # Show progress on canvas (simple placeholder)
+                    self.update_queue.put(lambda idx=i: self._draw_placeholder(idx))
 
-        if not vis_tokens: return None
+            # Stitch
+            if not self.stop_requested:
+                self.update_queue.put(lambda: self.lbl_status.config(text="Assembling Page..."))
+                self._assemble_page(prompts)
+                self.update_queue.put(lambda: self._display_result())
+
+        except Exception as e:
+            self.update_queue.put(lambda: self._on_error(str(e)))
+
+        self.is_rendering = False
+        self.update_queue.put(lambda: self.btn_draw.config(state="normal", text="🎨 DRAW PAGE"))
+
+    def _assemble_page(self, captions):
+        """Combines 4 images into a 2x2 grid with captions."""
+        # Assume 512x512 panels
+        w, h = 512, 512
+        # Page size: 2w x 2h + padding
+        pad = 20
+        page_w = (w * 2) + (pad * 3)
+        page_h = (h * 2) + (pad * 3) + 100  # Extra space for bottom captions if needed
+
+        bg_color = (255, 255, 255)  # White paper
+        page = Image.new("RGB", (page_w, page_h), bg_color)
+        draw = ImageDraw.Draw(page)
+
+        # Positions
+        positions = [
+            (pad, pad), (pad + w + pad, pad),
+            (pad, pad + h + pad), (pad + w + pad, pad + h + pad)
+        ]
 
         try:
-            return ribosome.decode_image_tokens(vis_tokens)
+            # Try to load a font, or default
+            font = ImageFont.truetype("arial.ttf", 20)
         except:
-            return None
+            font = ImageFont.load_default()
 
-    def _add_panel_to_ui(self, pil_img, text):
-        # Resize for display
-        display_img = pil_img.copy()
-        display_img.thumbnail((500, 500))
-        photo = ImageTk.PhotoImage(display_img)
-        self.image_refs.append(photo)
+        for i, img in enumerate(self.panel_images):
+            if img:
+                x, y = positions[i]
+                # Paste Image
+                page.paste(img, (x, y))
+                # Draw Border
+                draw.rectangle([x, y, x + w, y + h], outline=(0, 0, 0), width=3)
 
-        # Container
-        fr = ttk.Frame(self.scroll_frame, style="Card.TFrame", padding=10)
-        fr.pack(fill="x", pady=10, padx=10)
+                # Draw Caption (Simple strip at bottom of panel)
+                # cap = captions[i]
+                # draw.text((x, y + h + 5), cap[:50], fill=(0,0,0), font=font)
 
-        # Image
-        lbl_img = ttk.Label(fr, image=photo, background=self.app.colors["BG_CARD"])
-        lbl_img.pack()
+        self.final_page = page
 
-        # Caption
-        lbl_cap = ttk.Label(fr, text=text, wraplength=480, justify="center",
-                            background=self.app.colors["BG_CARD"], foreground=self.app.colors["FG_TEXT"])
-        lbl_cap.pack(pady=(5, 0))
+    def _draw_placeholder(self, idx):
+        # Just to show user something happened
+        pass
+
+    def _display_result(self):
+        if not self.final_page: return
+
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+
+        w, h = self.final_page.size
+        ratio = min(cw / w, ch / h)
+        new_w, new_h = int(w * ratio), int(h * ratio)
+
+        resized = self.final_page.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        self.tk_img = ImageTk.PhotoImage(resized)
+
+        self.canvas.delete("all")
+        x = (cw - new_w) // 2
+        y = (ch - new_h) // 2
+        self.canvas.create_image(x, y, anchor="nw", image=self.tk_img)
+
+        self.lbl_status.config(text="Page Complete.", foreground=self.app.colors["SUCCESS"])
+
+    def _save_page(self):
+        if not self.final_page: return
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        f = filedialog.asksaveasfilename(initialfile=f"comic_{ts}.png", defaultextension=".png")
+        if f:
+            self.final_page.save(f)
+            self.app.golgi.success(f"Comic saved to {f}", source="Comic")
+
+    def _on_error(self, msg):
+        self.lbl_status.config(text="Render Error.", foreground=self.app.colors["WARN"])
+        self.app.golgi.error(f"Comic Error: {msg}", source="Comic")
+
+    def _process_gui_queue(self):
+        while not self.update_queue.empty():
+            try:
+                fn = self.update_queue.get_nowait()
+                fn()
+            except:
+                break
+        if self.parent: self.parent.after(100, self._process_gui_queue)
 
     def on_theme_change(self):
-        c = self.app.colors
-        if hasattr(self, 'canvas'): self.canvas.config(bg=c["BG_CARD"])
+        pass

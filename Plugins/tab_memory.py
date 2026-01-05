@@ -16,8 +16,8 @@ persistent memory graphs, and local multimodal training.
 import tkinter as tk
 from tkinter import ttk, messagebox
 import yaml
-import threading
-import torch
+import time
+from datetime import datetime
 
 
 class Plugin:
@@ -26,104 +26,140 @@ class Plugin:
         self.app = app
         self.name = "Memory Graph"
 
-        self.search_var = tk.StringVar()
+        self.selected_node_id = None
+
+        # UI Scaling
+        self.scale = getattr(self.app, 'ui_scale', 1.0)
+
         self._setup_ui()
+        # Delay load to let Hippocampus boot
+        if self.parent:
+            self.parent.after(500, self._refresh_list)
 
     def _setup_ui(self):
-        # Split: List vs Details
-        pane = ttk.PanedWindow(self.parent, orient="horizontal")
-        pane.pack(fill="both", expand=True, padx=10, pady=10)
+        if self.parent is None: return
 
-        # LEFT: List
-        left = ttk.Frame(pane, width=300)
-        pane.add(left, weight=1)
+        # 1. TOOLBAR
+        fr_tools = ttk.Frame(self.parent)
+        fr_tools.pack(fill="x", padx=10, pady=5)
 
-        # Search Bar
-        row_search = ttk.Frame(left)
-        row_search.pack(fill="x", pady=5)
-        ttk.Entry(row_search, textvariable=self.search_var).pack(side="left", fill="x", expand=True)
-        ttk.Button(row_search, text="🔎", width=3, command=self._refresh_list).pack(side="left")
+        self.search_var = tk.StringVar()
+        self.search_var.trace("w", self._on_search)
 
-        # Treeview
-        self.tree = ttk.Treeview(left, columns=("Type", "Updated"), show="headings")
+        ttk.Label(fr_tools, text="🔍 Search Nodes:").pack(side="left")
+        ttk.Entry(fr_tools, textvariable=self.search_var, width=30).pack(side="left", padx=5)
+
+        ttk.Button(fr_tools, text="💾 SAVE CHANGES", command=self._save_changes).pack(side="right")
+        ttk.Button(fr_tools, text="🔄 RELOAD", command=self._refresh_list).pack(side="right", padx=5)
+
+        # 2. MAIN SPLIT
+        panes = ttk.PanedWindow(self.parent, orient="horizontal")
+        panes.pack(fill="both", expand=True, padx=10, pady=5)
+
+        # LEFT: Node List
+        fr_list = ttk.Frame(panes)
+        panes.add(fr_list, weight=1)
+
+        # Custom Tree Style for Scaling
+        style = ttk.Style()
+        row_h = int(25 * self.scale)
+        style.configure("Memory.Treeview", rowheight=row_h, font=("Segoe UI", int(10 * self.scale)))
+        style.configure("Memory.Treeview.Heading", font=("Segoe UI", int(11 * self.scale), "bold"))
+
+        cols = ("Entity", "Type")
+        self.tree = ttk.Treeview(fr_list, columns=cols, show="headings", style="Memory.Treeview")
+        self.tree.heading("Entity", text="Entity Name")
         self.tree.heading("Type", text="Type")
-        self.tree.heading("Updated", text="Updated")
-        self.tree.pack(fill="both", expand=True)
+        self.tree.column("Entity", width=int(200 * self.scale))
+        self.tree.column("Type", width=int(100 * self.scale))
+
+        sb = ttk.Scrollbar(fr_list, orient="vertical", command=self.tree.yview)
+        self.tree.configure(yscrollcommand=sb.set)
+
+        self.tree.pack(side="left", fill="both", expand=True)
+        sb.pack(side="right", fill="y")
+
         self.tree.bind("<<TreeviewSelect>>", self._on_select)
 
-        # RIGHT: Editor/Viewer
-        right = ttk.LabelFrame(pane, text="Entity Node Viewer")
-        pane.add(right, weight=3)
+        # RIGHT: Editor
+        fr_edit = ttk.LabelFrame(panes, text="Engram Editor (YAML)", padding=10)
+        panes.add(fr_edit, weight=2)
 
-        self.txt_editor = tk.Text(right, font=("Consolas", int(10 * getattr(self.app, 'ui_scale', 1.0))), bg="#1E1E1E", fg="#A8C7FA", insertbackground="white")
-        self.txt_editor.pack(fill="both", expand=True, padx=5, pady=5)
+        editor_font = ("Consolas", int(11 * self.scale))
+        self.txt_editor = tk.Text(fr_edit, font=editor_font, bg=self.app.colors["BG_MAIN"],
+                                  fg=self.app.colors["FG_TEXT"], insertbackground=self.app.colors["ACCENT"])
+        self.txt_editor.pack(side="left", fill="both", expand=True)
 
-        # Controls
-        ctrl = ttk.Frame(right)
-        ctrl.pack(fill="x", pady=5)
-        ttk.Button(ctrl, text="SAVE CHANGES", command=self._save_node).pack(side="right", padx=5)
-        ttk.Button(ctrl, text="DELETE NODE", command=self._delete_node).pack(side="left", padx=5)
-        ttk.Button(ctrl, text="REFRESH", command=self._refresh_list).pack(side="left", padx=5)
-
-        self._refresh_list()
+        sb2 = ttk.Scrollbar(fr_edit, orient="vertical", command=self.txt_editor.yview)
+        self.txt_editor.configure(yscrollcommand=sb2.set)
+        sb2.pack(side="right", fill="y")
 
     def _refresh_list(self):
-        self.tree.delete(*self.tree.get_children())
+        # Clear
+        for i in self.tree.get_children(): self.tree.delete(i)
+
+        if not self.app.hippocampus: return
+
+        # Load from Organelle
+        nodes = self.app.hippocampus.nodes  # Dict {name: NodeObj}
+
+        for name, node in nodes.items():
+            n_type = node.type
+            self.tree.insert("", "end", iid=name, values=(name, n_type))
+
+    def _on_search(self, *args):
         query = self.search_var.get().lower()
+        if not self.app.hippocampus: return
+
+        # Clear tree
+        for i in self.tree.get_children(): self.tree.delete(i)
 
         nodes = self.app.hippocampus.nodes
         for name, node in nodes.items():
-            if query and query not in name.lower():
-                continue
-
-            data = node.data
-            updated = str(data.get('last_updated', ''))
-            ntype = str(data.get('type', 'Unknown'))
-            self.tree.insert("", "end", iid=name, text=name, values=(ntype, updated))
+            if query in name.lower() or query in node.type.lower():
+                self.tree.insert("", "end", iid=name, values=(name, node.type))
 
     def _on_select(self, event):
         sel = self.tree.selection()
         if not sel: return
-        entity = sel[0]
 
-        node = self.app.hippocampus.nodes.get(entity)
-        if node:
-            # Dump YAML to text box
+        entity_name = sel[0]
+        self.selected_node_id = entity_name
+
+        if self.app.hippocampus and entity_name in self.app.hippocampus.nodes:
+            node = self.app.hippocampus.nodes[entity_name]
+            # Dump data to YAML string
             try:
                 y_str = yaml.dump(node.data, sort_keys=False, allow_unicode=True)
                 self.txt_editor.delete("1.0", tk.END)
                 self.txt_editor.insert("1.0", y_str)
             except Exception as e:
                 self.txt_editor.delete("1.0", tk.END)
-                self.txt_editor.insert("1.0", f"Error parsing YAML: {e}")
+                self.txt_editor.insert("1.0", f"# Error reading node:\n# {e}")
 
-    def _save_node(self):
-        sel = self.tree.selection()
-        if not sel: return
-        entity = sel[0]
+    def _save_changes(self):
+        if not self.selected_node_id: return
 
-        content = self.txt_editor.get("1.0", tk.END).strip()
+        raw_yaml = self.txt_editor.get("1.0", tk.END)
         try:
-            # Validate YAML
-            new_data = yaml.safe_load(content)
-            if not isinstance(new_data, dict): raise ValueError("Must be a dictionary")
+            new_data = yaml.safe_load(raw_yaml)
+            if not isinstance(new_data, dict):
+                raise ValueError("Must be a dictionary.")
 
-            self.app.hippocampus.update_memory_node(entity, new_data)
+            # Update Organelle
+            self.app.hippocampus.update_memory_node(self.selected_node_id, new_data)
             self.app.hippocampus.save_memory()
-            messagebox.showinfo("Success", f"Updated {entity}")
+
+            self.app.golgi.save(f"Updated memory: {self.selected_node_id}", source="MemoryTab")
+
+            # Refresh Type column if changed
+            self.tree.set(self.selected_node_id, "Type", new_data.get("type", "Unknown"))
+
         except Exception as e:
-            messagebox.showerror("YAML Error", str(e))
-
-    def _delete_node(self):
-        sel = self.tree.selection()
-        if not sel: return
-        entity = sel[0]
-
-        if messagebox.askyesno("Confirm", f"Delete memory of {entity}?"):
-            del self.app.hippocampus.nodes[entity]
-            self.app.hippocampus.save_memory()
-            self._refresh_list()
-            self.txt_editor.delete("1.0", tk.END)
+            messagebox.showerror("YAML Error", f"Invalid YAML Format:\n{e}")
 
     def on_theme_change(self):
-        pass
+        # Refresh colors
+        c = self.app.colors
+        if hasattr(self, 'txt_editor'):
+            self.txt_editor.config(bg=c["BG_MAIN"], fg=c["FG_TEXT"], insertbackground=c["ACCENT"])

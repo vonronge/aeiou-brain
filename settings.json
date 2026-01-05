@@ -26,6 +26,7 @@
     "tab_cortex",
     "tab_trainer",
     "tab_diffusion_trainer",
+    "tab_graphs",
     "tab_playground",
     "tab_rlm",
     "tab_dream",
@@ -36,9 +37,8 @@
     "tab_council",
     "tab_video_factory",
     "tab_comic",
-    "tab_graphs",
-    "tab_pdf_repair",
     "tab_lecture_factory",
+    "tab_pdf_repair",
     "tab_settings"
   ]
 }

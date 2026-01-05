@@ -14,253 +14,233 @@ persistent memory graphs, and local multimodal training.
 """
 
 import tkinter as tk
-from tkinter import ttk, messagebox, filedialog
+from tkinter import ttk, filedialog, messagebox
+from PIL import Image, ImageTk
 import threading
+import queue
 import os
 import time
-import torch
-import torch.nn.functional as F
 from datetime import datetime
-import traceback
-
-
-# --- HEADLESS HELPER ---
-class MockVar:
-    def __init__(self, value=None): self._val = value
-
-    def set(self, value): self._val = value
-
-    def get(self): return self._val
 
 
 class Plugin:
     def __init__(self, parent, app):
         self.parent = parent
         self.app = app
-        self.name = "Dream State"
+        self.name = "Dream Studio"
+
         self.is_dreaming = False
-        self.stop_requested = False
+        self.update_queue = queue.Queue()
+        self.last_image = None  # PIL Image
 
-        # --- DYNAMIC PATHS ---
-        # Get configured data dir or default to local
-        default_data = self.app.paths.get("data", os.path.join(self.app.paths["root"], "Training_Data"))
+        # --- SETTINGS ---
+        self.prompt_text = tk.StringVar(value="A futuristic bio-digital interface, glowing neon neurons")
+        self.neg_prompt = tk.StringVar(value="blurry, low quality, distortion")
 
-        # Chaos Buffer (Where dreams go to be sorted by Factory)
-        self.chaos_dir = os.path.join(default_data, "Chaos_Buffer")
-        if not os.path.exists(self.chaos_dir):
-            try:
-                os.makedirs(self.chaos_dir)
-            except:
-                pass
+        self.cfg_scale = tk.DoubleVar(value=5.0)
+        self.steps = tk.IntVar(value=30)
+        self.seed = tk.IntVar(value=-1)  # -1 = Random
+        self.resolution = tk.IntVar(value=256)  # Matches Ribosome default
 
-        # --- STATE ---
-        if self.parent is None:
-            # Headless Defaults
-            self.temperature = MockVar(0.85)
-            self.top_k = MockVar(50)
-            self.max_length = MockVar(1024)
-            self.refresh_rate = MockVar(1.0)
-            self.autosave = MockVar(True)
-            self.seed_prompt = MockVar("The nature of consciousness is")
-            self.diffusion_steps = MockVar(20)
-        else:
-            # GUI Defaults
-            self.temperature = tk.DoubleVar(value=0.85)
-            self.top_k = tk.IntVar(value=50)
-            self.max_length = tk.IntVar(value=1024)
-            self.refresh_rate = tk.DoubleVar(value=0.5)
-            self.autosave = tk.BooleanVar(value=True)
-            self.seed_prompt = tk.StringVar(value="The nature of consciousness is")
-            self.diffusion_steps = tk.IntVar(value=20)
+        self.mode = tk.StringVar(value="Visual")  # Visual, Audio, Text
 
         self._setup_ui()
+        if self.parent:
+            self.parent.after(100, self._process_gui_queue)
 
     def _setup_ui(self):
         if self.parent is None: return
 
-        # Layout
-        panel = ttk.PanedWindow(self.parent, orient="horizontal")
-        panel.pack(fill="both", expand=True, padx=10, pady=10)
+        scale = getattr(self.app, 'ui_scale', 1.0)
 
-        left = ttk.Frame(panel, width=300)
-        right = ttk.Frame(panel)
-        panel.add(left, weight=1)
-        panel.add(right, weight=3)
+        # Split: Controls (Left) | Preview (Right)
+        panes = ttk.PanedWindow(self.parent, orient="horizontal")
+        panes.pack(fill="both", expand=True, padx=10, pady=10)
 
-        # --- CONTROLS ---
-        fr_cfg = ttk.LabelFrame(left, text="Dream Parameters", padding=10)
-        fr_cfg.pack(fill="x", pady=5)
+        # --- LEFT: CONTROLS ---
+        fr_ctrl = ttk.Frame(panes)
+        panes.add(fr_ctrl, weight=1)
 
-        ttk.Label(fr_cfg, text="Seed Prompt:").pack(anchor="w")
-        ttk.Entry(fr_cfg, textvariable=self.seed_prompt).pack(fill="x", pady=(0, 10))
+        # 1. Prompt
+        lbl_p = ttk.Label(fr_ctrl, text="Dream Prompt:", font=("Segoe UI", int(11 * scale), "bold"))
+        lbl_p.pack(anchor="w", pady=(0, 5))
 
-        def add_scale(lbl, var, min_v, max_v):
-            ttk.Label(fr_cfg, text=lbl).pack(anchor="w")
-            ttk.Scale(fr_cfg, from_=min_v, to=max_v, variable=var, orient="horizontal").pack(fill="x", pady=(0, 10))
+        self.txt_prompt = tk.Text(fr_ctrl, height=4, font=("Segoe UI", int(10 * scale)),
+                                  bg=self.app.colors["BG_CARD"], fg=self.app.colors["FG_TEXT"],
+                                  insertbackground=self.app.colors["ACCENT"], wrap="word")
+        self.txt_prompt.insert("1.0", self.prompt_text.get())
+        self.txt_prompt.pack(fill="x", pady=(0, 10))
 
-        add_scale("Temperature (Creativity):", self.temperature, 0.1, 2.0)
-        add_scale("Top-K (Diversity):", self.top_k, 1, 200)
-        add_scale("Max Length:", self.max_length, 64, 4096)
+        lbl_n = ttk.Label(fr_ctrl, text="Negative Prompt:", font=("Segoe UI", int(10 * scale)))
+        lbl_n.pack(anchor="w")
+        entry_neg = ttk.Entry(fr_ctrl, textvariable=self.neg_prompt)
+        entry_neg.pack(fill="x", pady=(0, 15))
 
-        # Diffusion Specific
-        self.fr_diff = ttk.Frame(fr_cfg)
-        self.fr_diff.pack(fill="x")
-        ttk.Label(self.fr_diff, text="Diffusion Steps:", foreground=self.app.colors["ACCENT"]).pack(anchor="w")
-        ttk.Scale(self.fr_diff, from_=1, to=100, variable=self.diffusion_steps, orient="horizontal").pack(fill="x")
+        # 2. Parameters
+        fr_param = ttk.LabelFrame(fr_ctrl, text="Inference Parameters", padding=10)
+        fr_param.pack(fill="x", pady=5)
 
-        ttk.Checkbutton(fr_cfg, text="Autosave to Chaos", variable=self.autosave).pack(anchor="w", pady=5)
+        # Mode
+        r0 = ttk.Frame(fr_param)
+        r0.pack(fill="x", pady=5)
+        ttk.Label(r0, text="Modality:").pack(side="left")
+        ttk.Combobox(r0, textvariable=self.mode, values=["Visual", "Audio", "Narrative"],
+                     state="readonly", width=15).pack(side="left", padx=10)
 
-        self.btn_start = ttk.Button(left, text="INITIATE DREAM STATE", command=self._toggle_dream)
-        self.btn_start.pack(fill="x", pady=20)
+        # CFG
+        r1 = ttk.Frame(fr_param)
+        r1.pack(fill="x", pady=5)
+        ttk.Label(r1, text="Guidance (CFG):").pack(side="left", width=15)
+        s_cfg = ttk.Scale(r1, from_=1.0, to=20.0, variable=self.cfg_scale, orient="horizontal")
+        s_cfg.pack(side="left", fill="x", expand=True)
+        l_cfg = ttk.Label(r1, text=f"{self.cfg_scale.get():.1f}")
+        l_cfg.pack(side="left", padx=5)
+        s_cfg.configure(command=lambda v: l_cfg.configure(text=f"{float(v):.1f}"))
 
-        # --- VISUALIZATION ---
-        fr_vis = ttk.LabelFrame(right, text="The Mind's Eye", padding=10)
-        fr_vis.pack(fill="both", expand=True, pady=5)
+        # Steps
+        r2 = ttk.Frame(fr_param)
+        r2.pack(fill="x", pady=5)
+        ttk.Label(r2, text="Steps:").pack(side="left", width=15)
+        ttk.Spinbox(r2, from_=1, to=100, textvariable=self.steps, width=5).pack(side="left")
 
-        self.txt_out = tk.Text(fr_vis, font=("Consolas", int(11 * getattr(self.app, 'ui_scale', 1.0))), bg=self.app.colors["BG_MAIN"],
-                               fg=self.app.colors["FG_TEXT"], wrap="word", padx=15, pady=15, borderwidth=0)
-        self.txt_out.pack(fill="both", expand=True)
+        # Seed
+        r3 = ttk.Frame(fr_param)
+        r3.pack(fill="x", pady=5)
+        ttk.Label(r3, text="Seed (-1=Rnd):").pack(side="left", width=15)
+        ttk.Entry(r3, textvariable=self.seed, width=10).pack(side="left")
 
-        # Tags
-        self.txt_out.tag_config("prompt", foreground="#888")
-        self.txt_out.tag_config("new", foreground=self.app.colors["ACCENT"])
-        self.txt_out.tag_config("diff", foreground=self.app.colors["SUCCESS"])
+        # 3. Action
+        self.btn_dream = ttk.Button(fr_ctrl, text="✨ DREAM", command=self._start_dreaming)
+        self.btn_dream.pack(fill="x", pady=20)
 
-    def _log(self, text, tag="new"):
-        if self.parent:
-            self.txt_out.insert(tk.END, text, tag)
-            self.txt_out.see(tk.END)
-        else:
-            print(text, end="", flush=True)
+        self.lbl_status = ttk.Label(fr_ctrl, text="Ready.", foreground=self.app.colors["FG_DIM"], anchor="center")
+        self.lbl_status.pack(fill="x")
 
-    def _toggle_dream(self):
-        if self.is_dreaming:
-            self.stop_requested = True
-            if self.parent: self.btn_start.config(text="Stopping...")
-        else:
-            lobe_id = self.app.active_lobe.get()
-            if self.app.lobes[lobe_id] is None:
-                msg = "No Lobe Loaded."
-                if self.parent:
-                    messagebox.showerror("Error", msg)
-                else:
-                    print(msg)
-                return
+        # --- RIGHT: PREVIEW ---
+        fr_view = ttk.LabelFrame(panes, text="Manifestation", padding=10)
+        panes.add(fr_view, weight=3)
 
-            self.is_dreaming = True
-            self.stop_requested = False
-            if self.parent:
-                self.btn_start.config(text="WAKE UP")
-                self.txt_out.delete("1.0", tk.END)
+        self.canvas = tk.Canvas(fr_view, bg="#000000", highlightthickness=0)
+        self.canvas.pack(fill="both", expand=True)
 
-            threading.Thread(target=self._dream_loop, daemon=True).start()
+        # Toolbar
+        fr_tool = ttk.Frame(fr_view)
+        fr_tool.pack(fill="x", pady=5)
+        ttk.Button(fr_tool, text="💾 SAVE", command=self._save_result).pack(side="right")
+        ttk.Button(fr_tool, text="🗑️ CLEAR", command=self._clear_result).pack(side="right", padx=5)
 
-    def _dream_loop(self):
+    def _start_dreaming(self):
+        # 1. Validate
+        active_id = self.app.active_lobe.get()
+        lobe = self.app.lobe_manager.get_lobe(active_id)
+        if not lobe:
+            messagebox.showerror("Void", "No Lobe Loaded. Please activate a model first.")
+            return
+
+        self.is_dreaming = True
+        self.btn_dream.config(state="disabled", text="DREAMING...")
+        self.lbl_status.config(text="Initializing Cytosis...", foreground=self.app.colors["ACCENT"])
+
+        # Update prompt var from text box
+        self.prompt_text.set(self.txt_prompt.get("1.0", tk.END).strip())
+
+        # 2. Launch Thread
+        threading.Thread(target=self._worker, args=(lobe,), daemon=True).start()
+
+    def _worker(self, lobe):
         try:
-            lobe_id = self.app.active_lobe.get()
-            brain = self.app.lobes[lobe_id]
-            ribosome = self.app.ribosome
+            # Prepare Config
+            from Organelles.cytosis import DreamConfig
 
-            # Detect Type
-            is_diffusion = hasattr(brain, 'timestep_emb') or (self.app.lobe_types.get(lobe_id) == "diffusion")
+            cfg = DreamConfig(
+                prompt=self.prompt_text.get(),
+                negative_prompt=self.neg_prompt.get(),
+                cfg_scale=self.cfg_scale.get(),
+                steps=self.steps.get(),
+                seed=self.seed.get() if self.seed.get() != -1 else None,
+                modality=self.mode.get().lower()
+            )
 
-            if self.parent and is_diffusion:
-                self.fr_diff.pack(fill="x")
-            elif self.parent:
-                self.fr_diff.pack_forget()
+            # Call Organelle
+            self.update_queue.put(lambda: self.lbl_status.config(text="Inferencing..."))
 
-            while not self.stop_requested:
-                prompt = self.seed_prompt.get()
-                self._log(f"\n\n>>> SEED: {prompt}\n", "prompt")
+            # Returns dict {'image': PIL, 'audio': path, 'text': str}
+            result = self.app.cytosis.dream(lobe, cfg)
 
-                # Tokenize
-                ids = ribosome._tokenize(prompt)
-
-                generated_text = ""
-
-                with self.app.gpu_lock:
-                    brain.eval()
-                    with torch.no_grad():
-                        # --- DIFFUSION GENERATION ---
-                        if is_diffusion:
-                            steps = self.diffusion_steps.get()
-                            # Generate
-                            tokens = brain.generate(
-                                prompt_tokens=ids,
-                                max_length=self.max_length.get(),
-                                steps=steps,
-                                temperature=self.temperature.get()
-                            )
-                            generated_text = ribosome.decode(tokens)
-                            # Remove prompt echo
-                            if generated_text.startswith(prompt):
-                                generated_text = generated_text[len(prompt):]
-
-                            self._log(generated_text, "diff")
-
-                        # --- AR GENERATION ---
-                        else:
-                            t = torch.tensor(ids, device=self.app.device).unsqueeze(0)
-                            # Placeholder sensors
-                            v = torch.zeros(1, 1, 768).to(self.app.device)
-                            a = torch.zeros(1, 1, 128).to(self.app.device)
-
-                            for _ in range(self.max_length.get()):
-                                if self.stop_requested: break
-
-                                logits, _, _ = brain(v, a, t)
-                                next_logits = logits[:, -1, :] / self.temperature.get()
-                                probs = F.softmax(next_logits, dim=-1)
-
-                                # Top-K
-                                k = self.top_k.get()
-                                if k > 0:
-                                    v_top, _ = torch.topk(probs, k)
-                                    probs[probs < v_top[:, [-1]]] = 0
-                                    probs = probs / probs.sum(dim=-1, keepdim=True)
-
-                                next_tok = torch.multinomial(probs, 1)
-                                t = torch.cat([t, next_tok], dim=1)
-
-                                # Stream Decode
-                                word = ribosome.decode([next_tok.item()])
-                                self._log(word, "new")
-                                generated_text += word
-
-                                if next_tok.item() == 50256: break  # EOS
-                                time.sleep(0.01)  # UI Breather
-
-                # --- AUTOSAVE TO CHAOS ---
-                if self.autosave.get() and generated_text.strip():
-                    ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-                    fname = f"dream_{ts}.txt"
-                    path = os.path.join(self.chaos_dir, fname)
-
-                    try:
-                        with open(path, "w", encoding="utf-8") as f:
-                            f.write(f"PROMPT: {prompt}\n\n")
-                            f.write(generated_text)
-                        if self.parent:
-                            self._log(f"\n[Saved to Chaos Buffer: {fname}]", "prompt")
-                        else:
-                            print(f"\n[Saved: {fname}]")
-                    except Exception as e:
-                        print(f"Save Error: {e}")
-
-                if self.stop_requested: break
-                time.sleep(self.refresh_rate.get())
+            self.update_queue.put(lambda: self._on_success(result))
 
         except Exception as e:
-            if self.parent:
-                self._log(f"\nCRASH: {e}", "error")
-            else:
-                print(f"CRASH: {e}")
-            traceback.print_exc()
-        finally:
-            self.is_dreaming = False
-            if self.parent: self.btn_start.config(text="INITIATE DREAM STATE")
+            self.update_queue.put(lambda: self._on_error(str(e)))
+
+    def _on_success(self, result):
+        self.is_dreaming = False
+        self.btn_dream.config(state="normal", text="✨ DREAM")
+        self.lbl_status.config(text="Manifestation Complete.", foreground=self.app.colors["SUCCESS"])
+
+        # Handle Output
+        if result.get("image"):
+            self.last_image = result["image"]
+            self._display_image(self.last_image)
+
+        if result.get("audio"):
+            # Auto-play or show path
+            self.lbl_status.config(text=f"Audio Generated: {os.path.basename(result['audio'])}")
+
+        if result.get("text"):
+            # Show in a popup or separate box? For now, log it.
+            self.app.golgi.info(f"Narrative: {result['text'][:50]}...", source="Dream")
+
+    def _on_error(self, err_msg):
+        self.is_dreaming = False
+        self.btn_dream.config(state="normal", text="✨ DREAM")
+        self.lbl_status.config(text="Nightmare (Error).", foreground=self.app.colors["WARN"])
+        self.app.golgi.error(f"Dream Failed: {err_msg}", source="Dream")
+        messagebox.showerror("Dream Failed", err_msg)
+
+    def _display_image(self, pil_img):
+        # Resize to fit canvas
+        cw = self.canvas.winfo_width()
+        ch = self.canvas.winfo_height()
+        if cw < 10 or ch < 10: return
+
+        # Aspect Ratio
+        w, h = pil_img.size
+        ratio = min(cw / w, ch / h)
+        new_w, new_h = int(w * ratio), int(h * ratio)
+
+        resized = pil_img.resize((new_w, new_h), Image.Resampling.LANCZOS)
+        self.tk_img = ImageTk.PhotoImage(resized)  # Keep ref
+
+        self.canvas.delete("all")
+        # Center
+        x = (cw - new_w) // 2
+        y = (ch - new_h) // 2
+        self.canvas.create_image(x, y, anchor="nw", image=self.tk_img)
+
+    def _save_result(self):
+        if not self.last_image: return
+
+        ts = datetime.now().strftime("%Y%m%d_%H%M%S")
+        f = filedialog.asksaveasfilename(initialfile=f"dream_{ts}.png", defaultextension=".png")
+        if f:
+            self.last_image.save(f)
+            self.app.golgi.success(f"Saved dream to {f}", source="Dream")
+
+    def _clear_result(self):
+        self.canvas.delete("all")
+        self.last_image = None
+        self.lbl_status.config(text="Canvas Cleared.")
+
+    def _process_gui_queue(self):
+        while not self.update_queue.empty():
+            try:
+                fn = self.update_queue.get_nowait()
+                fn()
+            except:
+                break
+        if self.parent: self.parent.after(100, self._process_gui_queue)
 
     def on_theme_change(self):
         c = self.app.colors
-        if hasattr(self, 'txt_out'):
-            self.txt_out.config(bg=c["BG_MAIN"], fg=c["FG_TEXT"])
+        if hasattr(self, 'txt_prompt'):
+            self.txt_prompt.config(bg=c["BG_CARD"], fg=c["FG_TEXT"], insertbackground=c["ACCENT"])

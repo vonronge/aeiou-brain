@@ -175,6 +175,91 @@ python GUI.py              # Launch GUI
 python telepathy.py --headless --mode=train --lobe=1 --data="./Training_Data/MyFolder"
 ```
 
+
+# 🧠 System Architecture
+
+The AEIOU Brain is architected as a synthetic organism. The **Organelles** (Backend) handle the biological functions (processing, learning, memory), while the **Tabs** (Frontend) act as the Cortex, allowing you to consciously direct those functions.
+
+---
+
+## 🧬 Part 1: The Organelles (Backend Systems)
+*Located in the `Organelles/` folder. These internal organs run the machinery.*
+
+* **The Golgi (Apparatus)**
+    * **Function:** Central Nervous System & Messaging.
+    * **Role:** Captures logs, errors, and status updates from all other organs and routes them to the correct destination (GUI logs, terminal, or log files). If an organ fails, the Golgi reports the "pain."
+
+* **The Phagus**
+    * **Function:** Homeostasis & Environment.
+    * **Role:** Manages the `settings.json` file. Knows where folders are, stores UI theme preferences, and remembers window size/position. Ensures the environment is stable for the brain to live in.
+
+* **The Ribosome**
+    * **Function:** The Universal Translator.
+    * **Role:** Converts raw matter (Images, Audio, Text) into "Proteins" (Tokens/Tensors) that the neural network can understand.
+    * **Sub-Systems:**
+        * **Membrane:** Physical barrier handling file I/O.
+        * **Retina:** Extracts visual features from images.
+        * **MagViT:** Compresses images into discrete visual tokens.
+        * **EnCodec:** Compresses audio into discrete sound tokens.
+
+* **The Lobe Manager**
+    * **Function:** Stem Cell Differentiation & Management.
+    * **Role:** Responsible for the life cycle of AI models ("Lobes"). Creates new blank models, loads existing ones into VRAM, saves them to disk, and tracks which "Genetics" (Model Architecture) each Lobe uses.
+
+* **The Cytoplasm**
+    * **Function:** The Medium of Growth (Training).
+    * **Role:** The engine room. Takes Tensors from the Ribosome and the Model from the Lobe Manager to run training loops. Handles backpropagation, loss calculation, and optimization (weight updates).
+
+* **The Hippocampus**
+    * **Function:** Long-Term Semantic Memory.
+    * **Role:** A graph database storing concepts as "Engrams" (Nodes). Links related ideas together (e.g., "Fire" -> is hot -> "Burn"), allowing the AI to remember facts beyond its context window.
+
+* **The Reticulum**
+    * **Function:** Waste Disposal & Repair.
+    * **Role:** Scans the Hippocampus for "dead" memories (broken links, empty nodes) and prunes them. Ensures the knowledge graph remains healthy and efficient.
+
+* **The Symbiont**
+    * **Function:** Knowledge Transfer Agent.
+    * **Role:** Runs "Distillation" sessions where a large, mature "Teacher" Lobe transfers its knowledge to a smaller, faster "Student" Lobe, compressing intelligence into a more efficient form.
+
+* **The Cytosis**
+    * **Function:** The Hallucination Engine (Inference).
+    * **Role:** The opposite of the Cytoplasm. Instead of learning, it *generates*. Handles complex sampling loops required to produce images (Diffusion) or text (Autoregression).
+
+---
+
+## 🖥️ Part 2: The Cortex (Frontend / Tabs)
+*Located in the `Plugins/` folder. These are the user interfaces that control the Organelles.*
+
+### **Core Controls**
+* **Cortex Control (`tab_cortex`):** The main dashboard. Load/unload Lobes into the 4 available memory slots, create new brains, and view genetic stats.
+* **Settings (`tab_settings`):** The control panel for the Phagus. Change UI themes, scaling, and file paths.
+* **Visual Cortex (`tab_graphs`):** A real-time telemetry monitor showing training loss curves. Essential for verifying if the AI is learning or diverging.
+
+### **Training Centers**
+* **Transformer Trainer (`tab_trainer`):** The classroom for text and multimodal understanding. Teaches the AI to *read* and *predict* (Next-Token Prediction).
+* **Diffusion Director (`tab_diffusion_trainer`):** The art school. Teaches the AI to *draw* images by denoising static (Generative Diffusion).
+* **RL Gymnasium (`tab_rlm`):** The gym. Connects the AI to simulated environments (like games or physics sims) and rewards it for good behavior (Reinforcement Learning).
+* **Neural Symbiosis (`tab_symbiosis`):** The distillation lab. Connect a Teacher Lobe and a Student Lobe here to compress knowledge.
+
+### **Creative Studios**
+* **Playground (`tab_playground`):** The chat room. A direct interface to talk to the AI, send images, and observe responses.
+* **Dream Studio (`tab_dream`):** The art studio. Ask the AI to generate images, audio, or stories based on a prompt.
+* **Comic Architect (`tab_comic`):** A specialized sequencer that forces the AI to generate 4 consistent panels and stitches them into a comic page layout.
+* **The Council (`tab_council`):** A "Mixture of Experts" simulator. Submits a prompt to *all* active Lobes simultaneously, allowing them to debate the answer or synthesize a consensus.
+
+### **Data Factories (The Digestive System)**
+* **General Factory (`tab_factory`):** The chew toy. Grinds loose images and text files to standardize them (resize images, fix text encoding) for the Ribosome.
+* **Video Factory (`tab_video_factory`):** The butcher. Chops video files into "visual-audio pairs" (10-second chunks) for temporal training.
+* **Lecture Factory (`tab_lecture_factory`):** The scholar. Reads PDF textbooks (OCR + TTS) and creates a synchronized dataset of Text + Audio + Visuals.
+* **PDF Repair (`tab_pdf_repair`):** A utility tool to fix broken headers in corrupt PDF files.
+
+### **Memory Management**
+* **Memory Graph (`tab_memory`):** The file explorer for the Hippocampus. View, search, and manually edit the AI's long-term memories.
+* **Memory Agent (`tab_memory_agent`):** The gardener. Runs the Reticulum's cleaning cycles or asks an active Lobe to summarize and condense old memories ("Sleep Consolidation").
+
+
+
 MIT Licensed — experiment freely, share improvements.
 
 Feedback and PRs welcome! This is an ongoing personal research project.
