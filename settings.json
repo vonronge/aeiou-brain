@@ -20,8 +20,8 @@
   "chaos_dir": "D:\\AEIOU_Brain\\Training_Data\\Chaos_Buffer",
   "output_dir": "D:\\AEIOU_Brain\\Training_Data\\Comics_Output",
   "last_active_lobe": 4,
-  "window_geometry": "3840x2019+70+-33",
-  "window_state": "zoomed",
+  "window_geometry": "3616x1963+158+16",
+  "window_state": "normal",
   "sidebar_order": [
     "tab_cortex",
     "tab_trainer",
@@ -38,6 +38,8 @@
     "tab_comic",
     "tab_lecture_factory",
     "tab_pdf_repair",
-    "tab_settings"
+    "tab_settings",
+    "tab_epub_shrink",
+    "tab_symbiosis"
   ]
 }

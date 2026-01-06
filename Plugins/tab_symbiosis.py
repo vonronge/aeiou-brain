@@ -87,7 +87,8 @@ class Plugin:
         # Temperature
         r1 = ttk.Frame(fr_param)
         r1.pack(fill="x", pady=5)
-        ttk.Label(r1, text="Temperature (Softness):").pack(side="left", width=20)
+        # FIX: width goes in constructor, NOT pack()
+        ttk.Label(r1, text="Temperature (Softness):", width=25).pack(side="left")
         s_temp = ttk.Scale(r1, from_=1.0, to=10.0, variable=self.temperature, orient="horizontal")
         s_temp.pack(side="left", fill="x", expand=True)
         l_temp = ttk.Label(r1, text=f"{self.temperature.get():.1f}")
@@ -97,7 +98,8 @@ class Plugin:
         # Alpha (Balance)
         r2 = ttk.Frame(fr_param)
         r2.pack(fill="x", pady=5)
-        ttk.Label(r2, text="Alpha (Teacher Weight):").pack(side="left", width=20)
+        # FIX: width goes in constructor, NOT pack()
+        ttk.Label(r2, text="Alpha (Teacher Weight):", width=25).pack(side="left")
         s_alp = ttk.Scale(r2, from_=0.0, to=1.0, variable=self.alpha, orient="horizontal")
         s_alp.pack(side="left", fill="x", expand=True)
         l_alp = ttk.Label(r2, text=f"{self.alpha.get():.2f}")
@@ -130,7 +132,8 @@ class Plugin:
         self.log_box.pack(fill="both", expand=True)
 
         # Attach Golgi Sink for this tab
-        self.app.golgi.attach_sink("symbiosis_tab", self._on_golgi_message)
+        if self.app.golgi:
+            self.app.golgi.attach_sink("symbiosis_tab", self._on_golgi_message)
 
     def _validate_selection(self):
         t = self.teacher_id.get()
@@ -192,9 +195,9 @@ class Plugin:
             self.app.golgi.error(f"Symbiosis Failed: {e}", source="Symbiosis")
 
     def _monitor_loop(self):
-        while self.app.symbiont.is_active:
+        # Poll while active
+        while self.app.symbiont.is_running:
             time.sleep(0.5)
-            # You could pull stats from symbiont here if exposed
 
         self.is_running = False
         self.update_queue.put(lambda: self.btn_start.config(text="INITIATE SYMBIOSIS"))

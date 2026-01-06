@@ -5,17 +5,9 @@ GitHub: https://github.com/vonronge/aeiou-brain
 LinkedIn: https://www.linkedin.com/in/vonronge/
 Licensed under the MIT License.
 
-Genetics: CortexAligned-WideConvDiffusion
-Inspired by "Convolutional Architectures Are Cortex-Aligned De Novo" (Nature MI 2025)
-Ultra-wide convolutional U-Net denoiser with extreme feature expansion + spatial compression
-for de novo brain-like representations from initialization.
-
-New: Staggered Half-Neuron Training ("Awakening Mode")
-- Randomly activates awakening_rate fraction of channels per step
-- Pseudo-random reproducible masks → high overlap + eventual full coverage
-- Huge VRAM saver for single-GPU training
+Genetics: CortexAligned-WideConvDiffusion (v25.8)
+FIXED: Minimum Grid Size safety check to prevent U-Net crashes on small token counts.
 """
-
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -24,42 +16,26 @@ import random
 
 INFO = {
     "name": "CortexAligned-WideConv-Diffusion-512",
-    "desc": "Wide Conv U-Net. Dynamic Resolution + Awakening Mode.",
-    "vram_train": "10 GB (at 512 width)",
+    "desc": "Wide Conv U-Net. Dynamic Resolution. Crash Safe.",
+    "vram_train": "10 GB",
     "vram_run": "6 GB"
 }
-
 
 class NucleusConfig:
     def __init__(self):
         self.vocab_size = 72000
         self.mask_token_id = 71999
-
-        # Vocab ranges
         self.vocab_img_start = 50257
         self.vocab_aud_start = 66641
-
-        # Grid settings (Default)
         self.grid_side = 16
         self.img_tokens = self.grid_side ** 2
-
-        # --- ARCHITECTURE WIDTH ---
-        # 512 = Safe for 12GB VRAM.
-        # (Original paper used 1536+, which requires A100s)
         self.base_channels = 512
-
-        # Diffusion
         self.inference_steps = 32
-
-        # Masking Rates
         self.vis_mask_rate = 0.80
         self.text_mask_rate = 0.05
         self.aud_mask_rate = 0.30
         self.mot_mask_rate = 0.15
-
-        # Awakening Mode (VRAM Saver)
-        self.awakening_rate = 0.5  # 0.5 = 50% active per step
-
+        self.awakening_rate = 0.5
 
 def get_timestep_embedding(timesteps, dim):
     half = dim // 2
@@ -71,7 +47,6 @@ def get_timestep_embedding(timesteps, dim):
     if dim % 2:
         embedding = torch.cat([embedding, torch.zeros_like(embedding[:, :1])], dim=-1)
     return embedding
-
 
 class WideConvBlock(nn.Module):
     def __init__(self, channels, time_dim):
@@ -89,11 +64,11 @@ class WideConvBlock(nn.Module):
     def forward(self, x, time_emb=None):
         h = self.act(self.norm1(self.conv1(x)))
         h = self.act(self.norm2(self.conv2(h)))
-        if time_emb is not None:
-            t = self.time_mlp(time_emb)[:, :, None, None]
+        if time_emb is not None and self.time_mlp is not None:
+            t = self.time_mlp(time_emb)
+            t = t[:, :, None, None]
             h = h + t
         return h
-
 
 class DownBlock(nn.Module):
     def __init__(self, in_ch, out_ch, time_dim):
@@ -111,7 +86,6 @@ class DownBlock(nn.Module):
         out = self.down(h)
         return out, skip
 
-
 class UpBlock(nn.Module):
     def __init__(self, in_ch, out_ch, time_dim):
         super().__init__()
@@ -122,7 +96,6 @@ class UpBlock(nn.Module):
 
     def forward(self, x, skip, time_emb):
         x = self.up(x)
-        # Handle spatial mismatch if any (Robustness for variable grids)
         if x.shape[2:] != skip.shape[2:]:
             x = F.interpolate(x, size=skip.shape[2:], mode='bilinear', align_corners=False)
         x = torch.cat([x, skip], dim=1)
@@ -131,17 +104,15 @@ class UpBlock(nn.Module):
         x = self.block2(x, time_emb)
         return x
 
-
 class Model(nn.Module):
     def __init__(self, config=None):
         super().__init__()
-        if config is None:
-            config = NucleusConfig()
+        if config is None: config = NucleusConfig()
         self.config = config
         ch = config.base_channels
 
         self.tok_emb = nn.Embedding(config.vocab_size + 1, ch)
-        self.pos_emb = nn.Embedding(8192, ch)  # Increased for Tiling
+        self.pos_emb = nn.Embedding(8192, ch)
 
         self.time_mlp = nn.Sequential(
             nn.Linear(ch, ch * 4),
@@ -165,22 +136,17 @@ class Model(nn.Module):
         self.up3 = UpBlock(ch * 2, ch, ch)
 
         self.output = nn.Conv2d(ch, config.vocab_size, 1)
-
-        # Persistent Head for Text/Audio (The "Thinking" Stream)
         self.text_head = nn.Linear(ch, config.vocab_size)
 
     def _get_channel_mask(self, channels):
-        """Awakening Mode: Randomly activates subset of neurons."""
         rate = self.config.awakening_rate
-        if rate >= 1.0 or not self.training:
-            return None
-
+        if rate >= 1.0 or not self.training: return None
         active = int(channels * rate)
         device = next(self.parameters()).device
         idx = torch.randperm(channels, device=device)[:active]
         mask = torch.zeros(channels, device=device)
         mask[idx] = 1.0
-        mask = mask * (1.0 / rate)  # Scale to maintain magnitude
+        mask = mask * (1.0 / rate)
         return mask.view(1, -1, 1, 1)
 
     def _compute_modality_lengths_from_tokens(self, t):
@@ -198,7 +164,6 @@ class Model(nn.Module):
         device = seq.device
         masked_seq = seq.clone()
         mask = torch.zeros(T, device=device, dtype=torch.bool)
-
         def mask_section(start, end, rate):
             length = end - start
             if length <= 0: return
@@ -209,7 +174,6 @@ class Model(nn.Module):
             masked_seq[:, global_idx] = self.config.mask_token_id
 
         starts = [0, text_len, text_len + vis_len, text_len + vis_len + aud_len]
-
         if mask_ratio is not None:
             num_mask = int(T * mask_ratio)
             idx = torch.randperm(T, device=device)[:num_mask]
@@ -220,10 +184,7 @@ class Model(nn.Module):
             mask_section(starts[1], starts[2], self.config.vis_mask_rate)
             mask_section(starts[2], starts[3], self.config.aud_mask_rate)
             mask_section(starts[3], T, self.config.mot_mask_rate)
-
-        if mask.ndim == 1:
-            mask = mask.unsqueeze(0).expand(B, -1)
-
+        if mask.ndim == 1: mask = mask.unsqueeze(0).expand(B, -1)
         return masked_seq, mask
 
     def forward(self, v, a, t, c=None, timestep=None, mask_ratio=None, global_step=0):
@@ -232,96 +193,67 @@ class Model(nn.Module):
         ch = self.config.base_channels
 
         vis_len, aud_len, mot_len, text_len = self._compute_modality_lengths_from_tokens(t)
-
         seq_masked, mask = self._apply_masking(t, vis_len, aud_len, mot_len, text_len, mask_ratio)
 
         x = self.tok_emb(seq_masked)
-
-        # Safe Positional Embedding
         positions = torch.arange(T, device=device).unsqueeze(0).expand(B, -1)
-        if T > self.pos_emb.num_embeddings:
-            positions = positions % self.pos_emb.num_embeddings  # Cyclic fallback
+        if T > self.pos_emb.num_embeddings: positions = positions % self.pos_emb.num_embeddings
         x = x + self.pos_emb(positions)
 
-        # -----------------------------------------------------
-        # DYNAMIC GRID LOGIC (v25.1)
-        # Calculates square grid size from visual token count
-        # -----------------------------------------------------
         side = int(math.sqrt(vis_len))
-        is_square = (side * side == vis_len) and (vis_len > 0)
+        # [FIX] Enforce Minimum Grid Size (8x8 = 64 tokens) to prevent Downsample Crash
+        is_square = (side * side == vis_len) and (side >= 8)
 
-        # IF we have a valid square image/grid, run the U-Net
         if is_square:
             vis_start = text_len
             vis_x = x[:, vis_start:vis_start + vis_len, :]
-
-            # Reshape Sequence -> Grid [B, C, H, W]
             vis_x = vis_x.view(B, side, side, -1).permute(0, 3, 1, 2).contiguous()
 
-            if timestep is None:
-                timestep = torch.zeros(B, dtype=torch.long, device=device)
+            if timestep is None: timestep = torch.zeros(B, dtype=torch.long, device=device)
             t_emb_raw = get_timestep_embedding(timestep, ch)
-            t_emb = self.time_mlp(t_emb_raw)[:, :, None, None]
+            t_vec = self.time_mlp(t_emb_raw)
+            t_4d = t_vec[:, :, None, None]
 
-            # --- WIDE CONV U-NET ---
-            h = self.input_block(vis_x) + t_emb
+            h = self.input_block(vis_x) + t_4d
             skips = []
 
-            # Down
             mask_d1 = self._get_channel_mask(ch * 2)
-            h, skip = self.down1(h, t_emb)
+            h, skip = self.down1(h, t_vec)
             if mask_d1 is not None: h = h * mask_d1; skip = skip * mask_d1
             skips.append(skip)
 
             mask_d2 = self._get_channel_mask(ch * 4)
-            h, skip = self.down2(h, t_emb)
+            h, skip = self.down2(h, t_vec)
             if mask_d2 is not None: h = h * mask_d2; skip = skip * mask_d2
             skips.append(skip)
 
             mask_d3 = self._get_channel_mask(ch * 4)
-            h, skip = self.down3(h, t_emb)
+            h, skip = self.down3(h, t_vec)
             if mask_d3 is not None: h = h * mask_d3; skip = skip * mask_d3
             skips.append(skip)
 
-            # Bottleneck
             mask_bot = self._get_channel_mask(ch * 4)
             h = self.bottleneck(h)
             if mask_bot is not None: h = h * mask_bot
 
-            # Up
-            h = self.up1(h, skips.pop(), t_emb)
-            h = self.up2(h, skips.pop(), t_emb)
-            h = self.up3(h, skips.pop(), t_emb)
+            h = self.up1(h, skips.pop(), t_vec)
+            h = self.up2(h, skips.pop(), t_vec)
+            h = self.up3(h, skips.pop(), t_vec)
 
-            # Output Head
             vis_logits = self.output(h)
-
-            # Flatten back to sequence: [B, C, H, W] -> [B, Seq, Vocab]
             vis_logits = vis_logits.permute(0, 2, 3, 1).reshape(B, vis_len, -1)
         else:
             vis_logits = None
 
-        # -----------------------------------------------------
-        # LINEAR PROCESSING (Text / Audio / Non-Square Vis)
-        # -----------------------------------------------------
-
-        # If U-Net ran, we only need Linear head for the Text part
         if vis_logits is not None:
             vis_start = text_len
             text_logits = self.text_head(x[:, :vis_start, :])
-
-            # Combine [Text_Logits, Visual_Logits]
             logits = torch.cat([text_logits, vis_logits], dim=1)
-
-            # If there is Audio/Motion AFTER the visual block, process it linearly too
             total_processed = logits.shape[1]
             if total_processed < T:
                 tail_logits = self.text_head(x[:, total_processed:, :])
                 logits = torch.cat([logits, tail_logits], dim=1)
-
         else:
-            # Fallback: Treat EVERYTHING as a linear sequence
-            # (Used for pure text inputs or non-square image tokens)
             logits = self.text_head(x)
 
         return logits, mask, None
@@ -331,17 +263,12 @@ class Model(nn.Module):
                  force_sample_remaining=True):
         device = next(self.parameters()).device
         steps = steps or self.config.inference_steps
-
-        # Disable Awakening for Inference
         prev_rate = self.config.awakening_rate
         self.config.awakening_rate = 1.0
 
         if prompt_tokens is not None:
-            if isinstance(prompt_tokens, list):
-                seq = torch.tensor(prompt_tokens, device=device).unsqueeze(0)
-            else:
-                seq = prompt_tokens if prompt_tokens.ndim == 2 else prompt_tokens.unsqueeze(0)
-
+            if isinstance(prompt_tokens, list): seq = torch.tensor(prompt_tokens, device=device).unsqueeze(0)
+            else: seq = prompt_tokens if prompt_tokens.ndim == 2 else prompt_tokens.unsqueeze(0)
             curr_len = seq.shape[1]
             if curr_len < max_length:
                 pad = torch.full((1, max_length - curr_len), self.config.mask_token_id, device=device)
@@ -357,7 +284,6 @@ class Model(nn.Module):
             timestep = torch.tensor([ts_val], device=device)
 
             logits, _, _ = self.forward(None, None, seq, None, timestep=timestep)
-
             logits = logits / temperature
             if top_k > 0:
                 v_top, _ = torch.topk(logits, top_k)
@@ -365,27 +291,18 @@ class Model(nn.Module):
 
             probs = F.softmax(logits, dim=-1)
             confidences, predicted = torch.max(probs, dim=-1)
-
-            # Heuristic: Identify visual block for prioritized unmasking
-            # We assume visuals are at the end if present
-            # For pure text, this logic degrades gracefully
-
-            # Mask known
             confidences = confidences.masked_fill(known_mask, -float('inf'))
 
             num_remaining = (~known_mask).sum().item()
             num_unmask = max(1, int(num_remaining * (1 - ratio)))
-
             _, indices = torch.topk(confidences.flatten(), num_unmask)
 
             flat_mask = torch.zeros_like(known_mask.flatten(), dtype=torch.bool)
             flat_mask[indices] = True
             update_mask = flat_mask.view_as(known_mask)
-
             seq[update_mask] = predicted[update_mask]
             known_mask = known_mask | update_mask
 
-        # Cleanup
         if force_sample_remaining and not known_mask.all():
             timestep = torch.zeros(1, device=device, dtype=torch.long)
             logits, _, _ = self.forward(None, None, seq, None, timestep=timestep)

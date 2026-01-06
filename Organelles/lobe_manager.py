@@ -4,9 +4,8 @@ AEIOU Brain — Local Multimodal AI Ecosystem
 Copyright © 2026 Frederick von Rönge
 GitHub: https://github.com/vonronge/aeiou-brain
 
-The Lobe Manager:
-Central authority for loading, saving, and managing neural lobes.
-Abstracts away file I/O, dynamic imports, and hardware configuration.
+The Lobe Manager (v25.13):
+Fixed "Save Storm" crash. Now drops autosave requests if a save is already in progress.
 """
 
 import os
@@ -54,7 +53,11 @@ class Organelle_LobeManager:
         self.ribosome = ribosome
         self._active_lobes: Dict[int, LobeHandle] = {}
         self._genetics_registry: Dict[str, str] = {}
-        self._save_lock = threading.Lock()  # Prevent concurrent saves of same file
+
+        # [FIX] State flags for thread safety
+        self._save_lock = threading.Lock()
+        self._is_saving = False
+
         self.refresh_registry()
 
     def refresh_registry(self):
@@ -100,7 +103,6 @@ class Organelle_LobeManager:
         print(f"[LobeManager] Loading Lobe {lobe_id} from disk...")
 
         try:
-            # Load to CPU first to prevent OOM
             checkpoint = torch.load(path, map_location="cpu")
         except Exception as e:
             raise CorruptLobeError(f"Failed to load checkpoint: {e}")
@@ -127,10 +129,8 @@ class Organelle_LobeManager:
             # VRAM Safety Check
             param_size = sum(p.nelement() * p.element_size() for p in model.parameters())
             model_gb = param_size / (1024 ** 3)
-
             print(f"[LobeManager] Model Size: {model_gb:.2f} GB")
 
-            # Safe limit for 3080 Ti (12GB) is roughly 10GB loaded
             if model_gb < 10.0 and self.device == "cuda":
                 print("[LobeManager] Moving to GPU...")
                 model = model.to(self.device)
@@ -170,10 +170,8 @@ class Organelle_LobeManager:
         print(f"[LobeManager] Genesis: Creating Lobe {lobe_id} with {genome_name}...")
         module = self._import_genetics(genome_name)
         config = module.NucleusConfig()
-
         model = module.Model(config)
 
-        # Move to GPU if fits
         param_size = sum(p.nelement() * p.element_size() for p in model.parameters())
         if (param_size / 1e9) < 10 and self.device == "cuda":
             model = model.to(self.device)
@@ -200,28 +198,33 @@ class Organelle_LobeManager:
         )
 
         self._active_lobes[lobe_id] = handle
-        # Blocking save for initial create is fine
         self._sync_save(lobe_id)
         return handle
 
     # --- ASYNC SAVE LOGIC ---
     def save_lobe(self, lobe_id: int, custom_path: str = None) -> None:
         """
-        Non-blocking save.
-        1. Clones weights to CPU (Fast).
-        2. Spawns thread to write disk (Slow).
+        Non-blocking save. Drops request if save is already in progress.
         """
+        # [FIX] Check lock immediately
+        if self._is_saving:
+            print(f"[LobeManager] Save skipped: Previous save still writing.")
+            return
+
         handle = self._active_lobes.get(lobe_id)
         if not handle: return
 
         save_path = custom_path if custom_path else os.path.join(self.lobes_dir, f"brain_lobe_{lobe_id}.pt")
 
-        # 1. Fast Snapshot to CPU RAM
-        # We iterate and .cpu().clone() to ensure thread safety against ongoing training updates
+        # 1. Flag Start
+        self._is_saving = True
+
+        # 2. Fast Snapshot to CPU RAM
         try:
             cpu_state = {k: v.cpu().clone() for k, v in handle.model.state_dict().items()}
         except Exception as e:
             print(f"[LobeManager] Snapshot Failed: {e}")
+            self._is_saving = False
             return
 
         payload = {
@@ -230,7 +233,7 @@ class Organelle_LobeManager:
             "state_dict": cpu_state
         }
 
-        # 2. Background Writer
+        # 3. Background Writer
         def _write_worker():
             with self._save_lock:
                 try:
@@ -238,11 +241,12 @@ class Organelle_LobeManager:
                     torch.save(payload, temp_path)
                     if os.path.exists(save_path): os.remove(save_path)
                     os.rename(temp_path, save_path)
-                    # print(f"[LobeManager] Background Save Complete: Lobe {lobe_id}") # Optional: Reduce spam
                 except Exception as e:
                     print(f"[LobeManager] Background Save Failed: {e}")
+                finally:
+                    # [FIX] Release flag when done
+                    self._is_saving = False
 
-        # 3. Launch
         t = threading.Thread(target=_write_worker, daemon=True)
         t.start()
         print(f"[LobeManager] Snapshot taken. Saving Lobe {lobe_id} in background...")
