@@ -14,6 +14,7 @@ persistent memory graphs, and local multimodal training.
 """
 
 # FILE: Plugins/tab_graphs.py
+
 import tkinter as tk
 from tkinter import ttk
 import math
@@ -26,21 +27,16 @@ class Plugin:
         self.app = app
         self.name = "Telemetry"
 
-        # --- VIEW SETTINGS ---
-        self.smoothing = tk.IntVar(value=10)
-        self.show_power_law = tk.BooleanVar(value=True)
+        # Settings
+        self.smoothing = tk.IntVar(value=15)
         self.auto_refresh = tk.BooleanVar(value=True)
-        self.max_history = tk.IntVar(value=50)  # View window size
+        self.micro_window = tk.IntVar(value=1000)
 
-        # Layout Constants
-        self.MARGIN_LEFT = 65  # Increased to prevent text clipping
-        self.MARGIN_RIGHT = 20
-        self.MARGIN_TOP = 20
-        self.MARGIN_BOTTOM = 30
+        # Base Margins (Will scale slightly)
+        self.MARGIN_LEFT_BASE = 0.1  # 10% of width
+        self.MARGIN_TOP_BASE = 0.1  # 10% of height
 
         self._setup_ui()
-
-        # Start Animation Loop
         if self.parent:
             self.parent.after(2000, self._animate)
 
@@ -51,292 +47,135 @@ class Plugin:
         bar = ttk.Frame(self.parent, padding=5)
         bar.pack(fill="x")
 
-        # History Limit
-        ttk.Label(bar, text="View Width:").pack(side="left")
-        ttk.Spinbox(bar, from_=10, to=5000, textvariable=self.max_history, width=5,
-                    command=self._refresh_if_auto).pack(side="left", padx=5)
+        ttk.Label(bar, text="Micro Window:").pack(side="left")
+        ttk.Spinbox(bar, from_=100, to=10000, textvariable=self.micro_window, width=6).pack(side="left", padx=5)
 
-        # Smoothing Slider
         ttk.Label(bar, text="Smooth:").pack(side="left", padx=(10, 0))
-        scale = ttk.Scale(bar, from_=1, to=100, variable=self.smoothing, orient="horizontal", length=100,
-                          command=lambda v: self._refresh_if_auto())
-        scale.pack(side="left", padx=5)
+        ttk.Scale(bar, from_=1, to=100, variable=self.smoothing, orient="horizontal", length=100).pack(side="left",
+                                                                                                       padx=5)
 
-        # Toggles
-        ttk.Checkbutton(bar, text="Auto-Refresh (2s)", variable=self.auto_refresh).pack(side="left", padx=10)
-        ttk.Checkbutton(bar, text="Show Power Law", variable=self.show_power_law,
-                        command=self._refresh_if_auto).pack(side="left", padx=5)
-
-        # Manual Refresh
+        ttk.Checkbutton(bar, text="Auto-Refresh", variable=self.auto_refresh).pack(side="left", padx=10)
         ttk.Button(bar, text="⟳ REFRESH", command=self._update_graphs).pack(side="right", padx=5)
 
-        # 2. MAIN CANVAS (Step Loss)
-        self.canv_main = tk.Canvas(self.parent, bg=self.app.colors["BG_MAIN"], height=350, highlightthickness=0)
-        self.canv_main.pack(fill="both", expand=True, padx=10, pady=(5, 5))
+        # 2. UNIFIED CANVAS
+        self.canvas = tk.Canvas(self.parent, bg=self.app.colors["BG_MAIN"], highlightthickness=0)
+        self.canvas.pack(side="top", fill="both", expand=True, padx=10, pady=10)
 
-        # 3. AUX CANVAS (Epoch Trends)
-        self.canv_aux = tk.Canvas(self.parent, bg=self.app.colors["BG_CARD"], height=200, highlightthickness=0)
-        self.canv_aux.pack(fill="x", padx=10, pady=(0, 10))
-
-    def _refresh_if_auto(self, *args):
-        if self.auto_refresh.get():
-            self._update_graphs()
+        # Resize listener
+        self.canvas.bind("<Configure>", lambda e: self._update_graphs())
 
     def _animate(self):
-        if self.auto_refresh.get():
-            try:
-                # Only redraw if visible to save CPU
-                if self.parent.winfo_ismapped():
-                    self._update_graphs()
-            except:
-                pass
+        if self.auto_refresh.get() and self.parent.winfo_ismapped():
+            self._update_graphs()
         self.parent.after(2000, self._animate)
 
-    # --- MATH HELPERS ---
-    def _moving_average(self, data, window_size):
-        if not data: return []
-        data_arr = np.array(data)
-        eff_window = min(int(window_size), len(data_arr))
-        if eff_window < 2: return data_arr.tolist()
+    def _moving_average(self, data, window):
+        if not data or window < 2: return data
+        w = min(int(window), len(data))
+        if w < 2: return data
+        return np.convolve(data, np.ones(w) / w, 'valid').tolist()
 
-        window = np.ones(eff_window) / float(eff_window)
-        smoothed = np.convolve(data_arr, window, 'valid')
-
-        # Pad start to maintain alignment (right-aligned)
-        pad = len(data_arr) - len(smoothed)
-        return np.pad(smoothed, (pad, 0), mode='edge').tolist()
-
-    def _fit_power_law(self, x_vals, y_vals):
-        """Fits L = a * x^b"""
-        try:
-            x = np.array(x_vals)
-            y = np.array(y_vals)
-
-            # Filter valid
-            mask = (x > 0) & (y > 0)
-            x_clean = x[mask]
-            y_clean = y[mask]
-
-            if len(x_clean) < 5: return None, None
-
-            # Linear regression on log-log plot
-            x_log = np.log(x_clean)
-            y_log = np.log(y_clean)
-
-            b, ln_a = np.polyfit(x_log, y_log, 1)
-            a = np.exp(ln_a)
-
-            def predict(val):
-                return a * (val ** b)
-
-            return (a, b), predict
-        except:
-            return None, None
-
-    # --- DRAWING HELPERS ---
-    def _get_coords(self, data, width, height, min_val, max_val):
-        if len(data) < 2: return []
-
-        count = len(data)
-        # Use class constants for margins
-        draw_w = width - self.MARGIN_LEFT - self.MARGIN_RIGHT
-        draw_h = height - self.MARGIN_TOP - self.MARGIN_BOTTOM
-
-        x_step = draw_w / (count - 1)
-        y_range = max_val - min_val if (max_val - min_val) > 1e-6 else 1.0
-
-        coords = []
-        for i, val in enumerate(data):
-            x = self.MARGIN_LEFT + i * x_step
-            # Normalize Y (0 at bottom)
-            norm_y = (val - min_val) / y_range
-            # Flip for Canvas (0 at top)
-            y = (height - self.MARGIN_BOTTOM) - (norm_y * draw_h)
-            coords.extend([x, y])
-
-        return coords
-
-    def _draw_axes(self, canvas, width, height, min_val, max_val, h_lines=6):
-        canvas.delete("grid")
-        y_range = max_val - min_val
-
-        draw_h = height - self.MARGIN_TOP - self.MARGIN_BOTTOM
-        bottom_y = height - self.MARGIN_BOTTOM
-        left_x = self.MARGIN_LEFT
-        right_x = width - self.MARGIN_RIGHT
-
-        font_spec = ("Consolas", int(9 * getattr(self.app, 'ui_scale', 1.0)))
-
-        # Horizontal Grid Lines
-        for i in range(h_lines + 1):
-            ratio = i / h_lines
-            val = min_val + (ratio * y_range)
-            y = bottom_y - (ratio * draw_h)
-
-            color = self.app.colors["BORDER"]
-            canvas.create_line(left_x, y, right_x, y, fill=color, dash=(2, 2), tags="grid")
-            # Text Anchor East (Right aligned to margin)
-            canvas.create_text(left_x - 8, y, text=f"{val:.3f}", fill=self.app.colors["FG_DIM"],
-                               anchor="e", font=font_spec, tags="grid")
-
-        # Vertical Axes
-        canvas.create_line(left_x, self.MARGIN_TOP, left_x, bottom_y, fill=self.app.colors["FG_DIM"], width=1,
-                           tags="grid")
-        canvas.create_line(left_x, bottom_y, right_x, bottom_y, fill=self.app.colors["FG_DIM"], width=1, tags="grid")
-
-    # --- MAIN UPDATE LOOP ---
     def _update_graphs(self):
-        # Data is stored in app.graph_data: {epoch_int: {'total': [], 'text': [], ...}}
-        if not self.app.graph_data: return
+        c = self.canvas
+        c.delete("all")
 
-        # 1. Filter Data (Recent History)
-        limit = self.max_history.get()
-        all_epochs = sorted(self.app.graph_data.keys())
-        active_epochs = all_epochs[-limit:]
+        w = c.winfo_width()
+        h = c.winfo_height()
+        if w < 50 or h < 50: return
 
-        raw_recon = []  # Text Loss (Red)
-        raw_game = []  # Game/Vis Loss (Blue)
+        # --- DYNAMIC SCALING ---
+        # Calculate font size based on height (e.g., 1/25th of screen height)
+        # Clamped between 10 and 24
+        raw_fs = int(h / 25)
+        fs_axis = max(10, min(24, raw_fs))
+        fs_title = max(12, min(32, int(raw_fs * 1.2)))
 
-        epoch_avgs = []
-        epoch_indices = []
+        # Margins adapt to font size
+        m_left = fs_axis * 5  # Room for "0.0" text
+        m_right = 30
+        m_top = fs_title * 3
+        m_bottom = fs_title * 3
 
-        for ep in active_epochs:
-            ep_data = self.app.graph_data[ep]
-            # Use raw unscaled metrics if available
-            r = ep_data.get('raw_text', ep_data.get('text', []))
-            g = ep_data.get('raw_vis', ep_data.get('vis', []))
+        # --- DATA FETCH ---
+        macro_data = self.app.graph_macro.get('recon', []) if hasattr(self.app, 'graph_macro') else []
 
-            raw_recon.extend(r)
-            raw_game.extend(g)
+        raw_micro = []
+        if self.app.graph_data:
+            for ep in sorted(self.app.graph_data.keys()):
+                raw_recon = self.app.graph_data[ep].get('raw_text', [])
+                if raw_recon: raw_micro.extend(raw_recon)
 
-            if r:
-                avg = sum(r) / len(r)
-                epoch_avgs.append(avg)
-                epoch_indices.append(ep)
+        limit = self.micro_window.get()
+        if raw_micro: raw_micro = raw_micro[-limit:]
+        micro_data = self._moving_average(raw_micro, self.smoothing.get())
 
-        if not raw_recon: return
+        if not macro_data and not micro_data:
+            c.create_text(w / 2, h / 2, text="WAITING FOR DATA...", fill=self.app.colors["FG_DIM"],
+                          font=("Segoe UI", fs_title))
+            return
 
-        # 2. DRAW MAIN GRAPH (Step-wise)
-        w = self.canv_main.winfo_width()
-        h = self.canv_main.winfo_height()
+        # --- Y-RANGE ---
+        all_vals = macro_data + micro_data
+        if not all_vals: return
 
-        if w > 10 and h > 10:
-            self.canv_main.delete("line")
-            self.canv_main.delete("text")
+        min_y = max(0, min(all_vals) * 0.9)
+        max_y = max(all_vals) * 1.1
+        if max_y - min_y < 0.01: max_y += 0.1
 
-            # Smoothing
-            smooth = self.smoothing.get()
-            plot_recon = self._moving_average(raw_recon, smooth)
-            plot_game = self._moving_average(raw_game, smooth)
+        # Drawing Area
+        draw_w = w - m_left - m_right
+        draw_h = h - m_top - m_bottom
+        origin_x = m_left
+        origin_y = h - m_bottom
 
-            # Dynamic Range
-            all_vals = np.array(plot_recon + plot_game)
-            if len(all_vals) > 0:
-                min_y = max(0, np.min(all_vals) * 0.9)
-                max_y = np.max(all_vals) * 1.1
-            else:
-                min_y, max_y = 0, 1
+        # --- DRAW AXES ---
+        # Y Labels
+        for i in range(6):
+            ratio = i / 5
+            y = origin_y - (ratio * draw_h)
+            val = min_y + (ratio * (max_y - min_y))
 
-            self._draw_axes(self.canv_main, w, h, min_y, max_y, h_lines=8)
+            c.create_line(origin_x, y, w - m_right, y, fill=self.app.colors["BORDER"], dash=(2, 4))
+            c.create_text(origin_x - 10, y, text=f"{val:.1f}", anchor="e",
+                          fill=self.app.colors["FG_TEXT"], font=("Consolas", fs_axis, "bold"))
 
-            # Lines
-            coords_r = self._get_coords(plot_recon, w, h, min_y, max_y)
-            if len(coords_r) > 2:
-                self.canv_main.create_line(coords_r, fill=self.app.colors["ERROR"], width=2, tags="line")
+        # Vertical Line
+        c.create_line(origin_x, m_top, origin_x, origin_y, fill=self.app.colors["FG_DIM"], width=2)
 
-            coords_g = self._get_coords(plot_game, w, h, min_y, max_y)
-            if len(coords_g) > 2:
-                self.canv_main.create_line(coords_g, fill=self.app.colors["ACCENT"], width=2, tags="line")
+        # --- MACRO PLOT ---
+        if len(macro_data) > 1:
+            color_macro = self.app.colors["ACCENT"]
+            points = []
+            x_step = draw_w / (len(macro_data) - 1)
+            for i, val in enumerate(macro_data):
+                px = origin_x + i * x_step
+                norm_y = (val - min_y) / (max_y - min_y)
+                py = origin_y - (norm_y * draw_h)
+                points.extend([px, py])
 
-            # Legend
-            font_spec = ("Segoe UI", int(9 * getattr(self.app, 'ui_scale', 1.0)), "bold")
-            info = f"Last {len(active_epochs)} Epochs"
-            self.canv_main.create_text(w - 20, self.MARGIN_TOP, text=f"Reconstruction (Red)\nGame/Vis (Blue)\n{info}",
-                                       fill=self.app.colors["FG_TEXT"], anchor="ne", font=font_spec, tags="text")
+            if points:
+                c.create_line(points, fill=color_macro, width=3, smooth=True)
 
-        # 3. DRAW AUX GRAPH (Power Law Projection)
-        w_aux = self.canv_aux.winfo_width()
-        h_aux = self.canv_aux.winfo_height()
+            c.create_text(w / 2, h - (m_bottom / 2), text=f"MACRO HISTORY ({len(macro_data)}k Steps)",
+                          fill=color_macro, font=("Segoe UI", fs_title, "bold"))
 
-        if w_aux > 10 and h_aux > 10:
-            self.canv_aux.delete("line")
-            self.canv_aux.delete("text")
+        # --- MICRO PLOT ---
+        if len(micro_data) > 1:
+            color_micro = self.app.colors["ERROR"]
+            points = []
+            x_step = draw_w / (len(micro_data) - 1)
+            for i, val in enumerate(micro_data):
+                px = origin_x + i * x_step
+                norm_y = (val - min_y) / (max_y - min_y)
+                py = origin_y - (norm_y * draw_h)
+                points.extend([px, py])
 
-            if epoch_avgs:
-                min_e = min(epoch_avgs) * 0.9
-                max_e = max(epoch_avgs) * 1.1
+            if points:
+                c.create_line(points, fill=color_micro, width=2)
 
-                self._draw_axes(self.canv_aux, w_aux, h_aux, min_e, max_e, h_lines=5)
-
-                # Forecasting
-                future_ep = epoch_indices[-1]
-                pl_coords = []
-                pl_label = ""
-
-                if self.show_power_law.get() and len(epoch_avgs) > 5:
-                    params, predict_fn = self._fit_power_law(epoch_indices, epoch_avgs)
-                    if params:
-                        a, b = params
-                        # Forecast 50% into future
-                        future_ep = int(epoch_indices[-1] * 1.5)
-
-                        trend_x = np.linspace(epoch_indices[0], future_ep, 50)
-                        trend_y = predict_fn(trend_x)
-
-                        # Project coords onto canvas space
-                        # X-axis range: [start_epoch, future_epoch]
-                        total_x_range = future_ep - epoch_indices[0]
-                        if total_x_range == 0: total_x_range = 1
-
-                        draw_w = w_aux - self.MARGIN_LEFT - self.MARGIN_RIGHT
-                        draw_h = h_aux - self.MARGIN_TOP - self.MARGIN_BOTTOM
-
-                        x_step_pl = draw_w / total_x_range
-                        y_range_pl = max_e - min_e
-                        if y_range_pl < 1e-6: y_range_pl = 1.0
-
-                        for tx, ty in zip(trend_x, trend_y):
-                            cx = self.MARGIN_LEFT + (tx - epoch_indices[0]) * x_step_pl
-                            # Clamp Y to view
-                            ty_c = max(min_e, min(max_e, ty))
-                            cy = (h_aux - self.MARGIN_BOTTOM) - ((ty_c - min_e) / y_range_pl * draw_h)
-                            pl_coords.extend([cx, cy])
-
-                        pl_label = f"L ≈ {a:.3f}·e^({b:.3f})"
-
-                # Draw Projection Line
-                if pl_coords:
-                    self.canv_aux.create_line(pl_coords, fill=self.app.colors["WARN"], width=2, dash=(4, 2),
-                                              tags="line")
-                    self.canv_aux.create_text(w_aux - 20, self.MARGIN_TOP, text=pl_label, fill=self.app.colors["WARN"],
-                                              anchor="ne", font=("Consolas", 9), tags="text")
-
-                # Draw Actual Epoch Points
-                total_x_range = future_ep - epoch_indices[0]
-                if total_x_range == 0: total_x_range = 1
-
-                draw_w = w_aux - self.MARGIN_LEFT - self.MARGIN_RIGHT
-                draw_h = h_aux - self.MARGIN_TOP - self.MARGIN_BOTTOM
-
-                x_step_act = draw_w / total_x_range
-                y_range_act = max_e - min_e
-
-                act_coords = []
-                for ep, val in zip(epoch_indices, epoch_avgs):
-                    cx = self.MARGIN_LEFT + (ep - epoch_indices[0]) * x_step_act
-                    cy = (h_aux - self.MARGIN_BOTTOM) - ((val - min_e) / y_range_act * draw_h)
-                    act_coords.extend([cx, cy])
-
-                if len(act_coords) > 2:
-                    self.canv_aux.create_line(act_coords, fill=self.app.colors["SUCCESS"], width=2, tags="line")
-                    # Dots
-                    for i in range(0, len(act_coords), 2):
-                        cx, cy = act_coords[i], act_coords[i + 1]
-                        self.canv_aux.create_oval(cx - 2, cy - 2, cx + 2, cy + 2,
-                                                  fill=self.app.colors["BG_MAIN"], outline=self.app.colors["SUCCESS"],
-                                                  tags="line")
+            c.create_text(w / 2, m_top / 2, text=f"MICRO VIEW (Last {len(micro_data)} Steps)",
+                          fill=color_micro, font=("Segoe UI", fs_title, "bold"))
 
     def on_theme_change(self):
-        c = self.app.colors
-        if hasattr(self, 'canv_main'): self.canv_main.config(bg=c["BG_MAIN"])
-        if hasattr(self, 'canv_aux'): self.canv_aux.config(bg=c["BG_CARD"])
+        if hasattr(self, 'canvas'):
+            self.canvas.config(bg=self.app.colors["BG_MAIN"])

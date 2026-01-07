@@ -20,14 +20,14 @@
   "chaos_dir": "D:\\AEIOU_Brain\\Training_Data\\Chaos_Buffer",
   "output_dir": "D:\\AEIOU_Brain\\Training_Data\\Comics_Output",
   "last_active_lobe": 4,
-  "window_geometry": "3616x1963+158+16",
-  "window_state": "normal",
+  "window_geometry": "3840x2019+419+16",
+  "window_state": "zoomed",
   "sidebar_order": [
     "tab_cortex",
     "tab_trainer",
     "tab_diffusion_trainer",
-    "tab_graphs",
     "tab_playground",
+    "tab_graphs",
     "tab_rlm",
     "tab_dream",
     "tab_memory",
@@ -36,10 +36,10 @@
     "tab_council",
     "tab_video_factory",
     "tab_comic",
-    "tab_lecture_factory",
-    "tab_pdf_repair",
     "tab_settings",
     "tab_epub_shrink",
-    "tab_symbiosis"
+    "tab_symbiosis",
+    "tab_lecture_factory",
+    "tab_pdf_repair"
   ]
 }
